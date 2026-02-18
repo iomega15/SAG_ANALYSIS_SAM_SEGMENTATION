@@ -35,6 +35,11 @@ if saveSagDebug
     fprintf('Debug folder created: %s\n', debugFolder);
 end
 
+%% CREATE RESULTS FOLDER
+resultsFolder = fullfile(rootDir, 'results');
+make_clean_folder(resultsFolder);
+fprintf('Clean results folder created: %s\n', resultsFolder);
+
 %% FIND IMAGES
 % Additional directories to include
 %additionalDirs = {
@@ -94,6 +99,15 @@ SagPct_ofTheoreticalHeight  = nan(N,1);
 SagPct_ofWidthSpan          = nan(N,1);
 ParabolaR2                  = nan(N,1);
 
+% ===== SAG ANALYSIS METRICS =====
+SagArea_px2             = nan(N,1); % 
+SagArea_mm2             = nan(N,1); % 
+
+% ===== SAG VALIDATION FLAGS =====
+IsVertexBetween         = false(N,1);
+IsVertexLowerLeft       = false(N,1);
+IsVertexLowerRight      = false(N,1);
+
 MeasuredHeight_px           = nan(N,1);
 MeasuredHeight_mm           = nan(N,1);
 TheoreticalHeight_px        = nan(N,1);
@@ -124,6 +138,19 @@ Solidity                = nan(N,1);
 DebrisArea_px           = nan(N,1);
 DebrisArea_mm2          = nan(N,1);
 DebrisPct_ofLumen       = nan(N,1);
+
+% BoundingBox-based sag metrics
+SagDepthBB_px               = nan(N,1);
+SagDepthBB_mm               = nan(N,1);
+SagAreaBB_px2               = nan(N,1);
+SagAreaBB_mm2               = nan(N,1);
+SagBB_Pct_ofMeasuredHeight  = nan(N,1);
+SagBB_Pct_ofTheoreticalHeight = nan(N,1);
+SagBB_Pct_ofWidthSpan       = nan(N,1);
+BaselineDiff_px             = nan(N,1);
+BaselineDiff_mm             = nan(N,1);
+
+RotationAngle_deg = nan(N,1);
 
 Notes        = cell(N,1);
 
@@ -160,14 +187,30 @@ T = table( ...
     Lens_OCR, TiltDeg_OCR, ...
     ScaleValue_OCR, ScaleUnits_OCR, ...
     BarPx, mmPerPx, ...
+    RotationAngle_deg, ...
     LumenArea_px, LumenWidth_px, LumenHeight_px, ...
+    ... % Corner-based sag (original)
     SagDepth_px, SagDepth_mm, ...
+    SagArea_px2, SagArea_mm2, ...
     SagPct_ofMeasuredHeight, SagPct_ofTheoreticalHeight, SagPct_ofWidthSpan, ...
+    ... % BoundingBox-based sag (new)
+    SagDepthBB_px, SagDepthBB_mm, ...
+    SagAreaBB_px2, SagAreaBB_mm2, ...
+    SagBB_Pct_ofMeasuredHeight, SagBB_Pct_ofTheoreticalHeight, SagBB_Pct_ofWidthSpan, ...
+    ... % Baseline comparison
+    BaselineDiff_px, BaselineDiff_mm, ...
+    ... % Parabola & validation
     ParabolaR2, ...
+    IsVertexBetween, IsVertexLowerLeft, IsVertexLowerRight, ...
+    ... % Height
     MeasuredHeight_px, MeasuredHeight_mm, TheoreticalHeight_px, TheoreticalHeight_mm, HeightPct_ofTheoretical, ...
+    ... % Width
     MeasuredWidth_px, MeasuredWidth_mm, TheoreticalWidth_px, TheoreticalWidth_mm, WidthPct_ofTheoretical, ...
+    ... % Wall tilt
     LeftWallTiltAngle_deg, RightWallTiltAngle_deg, AvgWallTiltAngle_deg, TotalWallInward_mm, ...
+    ... % Area
     ActualArea_mm2, TheoreticalArea_mm2, AreaPct_ofTheoretical, ConvexityRatio, ...
+    ... % Lumen quality
     LumenBrightness, LumenBrightnessStd, LumenStatus, Solidity, ...
     DebrisArea_px, DebrisArea_mm2, DebrisPct_ofLumen, ...
     Notes);
@@ -242,7 +285,6 @@ fprintf('=== Removed %d superseded experiments, %d remaining ===\n\n', nRemoved,
 
 %% PASS 1: FILL OCR + MEASUREMENTS + SAG ANALYSIS (SLOW)
 tic
-% Reset start index to 1 for generic run, or change to 34 if you are resuming
 for i = 1:height(T) 
     try
         fpath = fullfile(T.Folder{i}, T.File{i});
@@ -264,54 +306,107 @@ for i = 1:height(T)
             T.mmPerPx(i) = T.ScaleValue_OCR(i) / T.BarPx(i);
         end
       
-        % Get base name for debug files
+        % Get base name
         [~, baseName, ~] = fileparts(T.File{i});
         
-        % Lumen segmentation
-        [BWlumen, samQuality] = segmentLumenSAM(I, roi, debugFolder, baseName);
+        % Define backup folder path
+        backupDir = fullfile(T.Folder{i}, 'backup');
+        if ~exist(backupDir, 'dir')
+            mkdir(backupDir);
+        end
         
-        % ... [Rest of Debug Image Saving Code omitted for brevity, logic remains same] ...
-        % Re-inserting standard debug saving logic if you need it:
+        % Define path for SAM backup file
+        backupFile = fullfile(backupDir, [baseName '_sam_data.mat']);
+        
+        % FORCE RE-RUN OPTION
+        forceSAM = false; 
+        
+        if exist(backupFile, 'file') && ~forceSAM
+            loadedData = load(backupFile, 'BWlumen', 'samQuality');
+            BWlumen = loadedData.BWlumen;
+            samQuality = loadedData.samQuality;
+        else
+            % Run SAM on ORIGINAL image (no rotation yet)
+            [BWlumen, samQuality] = segmentLumenSAM(I, roi, debugFolder, baseName);
+            
+            try
+                save(backupFile, 'BWlumen', 'samQuality');
+            catch
+                warning('Could not save SAM backup file to %s', backupFile);
+            end
+        end
+
+
+        % ================================================================
+        % ROTATION STEP: Apply AFTER SAM, BEFORE measureMembraneSag
+        % ================================================================
+        [I_rotated, BWlumen_rotated, rotationAngle] = autoRotateImage(I, BWlumen, roi, saveSagDebug, debugFolder, baseName);
+        
+        if abs(rotationAngle) > 0.05
+            fprintf('  Auto-rotated by %.2f degrees\n', rotationAngle);
+        end
+        
+        % Store rotation angle in table
+        T.RotationAngle_deg(i) = rotationAngle;
+        % ================================================================
+        % END ROTATION STEP
+        % ================================================================
+      
+        % Update LumenStatus from SAM
+        if isfield(samQuality, 'polarity')
+            T.LumenStatus{i} = samQuality.polarity;
+        else
+            T.LumenStatus{i} = 'unknown';
+        end
+        
+        % Debug Figure: SAM result (show rotated version)
         if saveSagDebug
-             % --- Debug Figure: SAM result ---
             figSAM = figure('Visible', 'off', 'Position', [100 100 1400 500]);
-            subplot(1,3,1); imshow(I); title('Original');
-            subplot(1,3,2); imshow(BWlumen); title('SAM Mask');
-            subplot(1,3,3); imshow(I); hold on;
-            if any(BWlumen(:)), visboundaries(BWlumen,'Color','r'); end
+            subplot(1,3,1); imshow(I_rotated); title('Image (Rotated)');
+            subplot(1,3,2); imshow(BWlumen_rotated); title('SAM Mask (Rotated)');
+            subplot(1,3,3); imshow(I_rotated); hold on;
+            if any(BWlumen_rotated(:)), visboundaries(BWlumen_rotated,'Color','r'); end
             hold off; title('Overlay');
             saveas(figSAM, fullfile(debugFolder, [baseName '_SAM_debug.png']));
             close(figSAM);
         end
         
-        % ====================================================================
-        % Basic lumen metrics 
-        lumenFound = any(BWlumen(:));
+        % ================================================================
+        % Basic lumen metrics (use ROTATED mask)
+        % ================================================================
+        lumenFound = any(BWlumen_rotated(:));
         sagValid = false;
         
         if lumenFound
-            rp = regionprops(BWlumen,'Area','BoundingBox');
+            rp = regionprops(BWlumen_rotated, 'Area', 'BoundingBox');
             [~,k] = max([rp.Area]);
             bb = rp(k).BoundingBox; 
             T.LumenArea_px(i)   = rp(k).Area;
             T.LumenWidth_px(i)  = bb(3);
             T.LumenHeight_px(i) = bb(4);
             
-            % ===== SAG ANALYSIS =====
-            sagMetrics = measureMembraneSag(BWlumen, T.mmPerPx(i), false, ...
+            % ===== SAG ANALYSIS (use ROTATED mask) =====
+            sagMetrics = measureMembraneSag(BWlumen_rotated, T.mmPerPx(i), false, ...
                                             T.H_layers(i), T.Width_px(i), ...
                                             layerHeight_mm, pixelWidth_mm);
             
             sagValid = sagMetrics.valid;
             
             if sagValid
-                % Sag depth
+                % --- Sag measurements ---
                 T.SagDepth_px(i)                = sagMetrics.sagDepth_px;
                 T.SagDepth_mm(i)                = sagMetrics.sagDepth_mm;
-                T.SagPct_ofMeasuredHeight(i)    = sagMetrics.sagPct_ofMeasuredHeight;
+                T.SagPct_ofMeasuredHeight(i)   = sagMetrics.sagPct_ofMeasuredHeight;
                 T.SagPct_ofTheoreticalHeight(i) = sagMetrics.sagPct_ofTheoreticalHeight;
                 T.SagPct_ofWidthSpan(i)         = sagMetrics.sagPct_ofWidthSpan;
                 T.ParabolaR2(i)                 = sagMetrics.parabolaR2;
+                
+                T.SagArea_px2(i)                = sagMetrics.sagArea_px2;
+
+                % --- Validation Flags ---
+                T.IsVertexBetween(i)    = sagMetrics.isVertexBetween;
+                T.IsVertexLowerLeft(i)  = sagMetrics.isVertexLowerLeft;
+                T.IsVertexLowerRight(i) = sagMetrics.isVertexLowerRight;
                 
                 % Height
                 T.MeasuredHeight_px(i)          = sagMetrics.measuredHeight_px;
@@ -339,8 +434,19 @@ for i = 1:height(T)
                 T.AreaPct_ofTheoretical(i)      = sagMetrics.areaPct_ofTheoretical;
                 T.ConvexityRatio(i)             = sagMetrics.convexityRatio;
 
-                % ===== LUMEN QUALITY ANALYSIS =====
-                qualityMetrics = analyzeLumenQuality(BWlumen, sagMetrics, I, T.mmPerPx(i));
+                % BoundingBox-based sag
+                T.SagDepthBB_px(i)              = sagMetrics.sagDepthBB_px;
+                T.SagDepthBB_mm(i)              = sagMetrics.sagDepthBB_mm;
+                T.SagAreaBB_px2(i)              = sagMetrics.sagAreaBB_px2;
+                T.SagAreaBB_mm2(i)              = sagMetrics.sagAreaBB_mm2;
+                T.SagBB_Pct_ofMeasuredHeight(i) = sagMetrics.sagBB_Pct_ofMeasuredHeight;
+                T.SagBB_Pct_ofTheoreticalHeight(i) = sagMetrics.sagBB_Pct_ofTheoreticalHeight;
+                T.SagBB_Pct_ofWidthSpan(i)      = sagMetrics.sagBB_Pct_ofWidthSpan;
+                T.BaselineDiff_px(i)            = sagMetrics.baselineDiff_px;
+                T.BaselineDiff_mm(i)            = sagMetrics.baselineDiff_mm;
+
+                % ===== LUMEN QUALITY ANALYSIS (use ROTATED image & mask) =====
+                qualityMetrics = analyzeLumenQuality(BWlumen_rotated, sagMetrics, I_rotated, T.mmPerPx(i));
                 
                 if qualityMetrics.valid
                     T.LumenBrightness(i)      = qualityMetrics.brightness;
@@ -352,14 +458,14 @@ for i = 1:height(T)
                     T.DebrisPct_ofLumen(i)    = qualityMetrics.debrisPct_ofLumen;
                 end
                 
-                % Save additional debug figures 
+                % Save additional debug figures (use ROTATED versions)
                 if saveSagDebug
-                    figSag = measureMembraneSag_debugFigure(BWlumen, sagMetrics, T.File{i});
+                    figSag = measureMembraneSag_debugFigure(BWlumen_rotated, sagMetrics, T.File{i});
                     saveas(figSag, fullfile(debugFolder, [baseName '_sag_debug.png']));
                     close(figSag);
                     
                     if qualityMetrics.valid
-                        figQuality = plotLumenQualityDebug(I, BWlumen, qualityMetrics, T.File{i});
+                        figQuality = plotLumenQualityDebug(I_rotated, BWlumen_rotated, qualityMetrics, T.File{i});
                         saveas(figQuality, fullfile(debugFolder, [baseName '_quality_debug.png']));
                         close(figQuality);
                     end
@@ -401,94 +507,22 @@ T_sag_stats = groupsummary(T, {'Width_px', 'Roof_layers', 'Condition'}, {'mean',
 valid_sag = ~isnan(T_sag_stats.mean_SagPct_ofMeasuredHeight);
 T_sag_stats = T_sag_stats(valid_sag, :);
 
-% FIGURE 1: Comparative Sag %
-figure('Position', [100 100 1000 700]);
-hold on;
+%% VISUALIZATION: Sag Analysis Summary Plots
 
-conditions = unique(T_sag_stats.Condition);
-colors = {'r', 'b', 'g', 'k'}; % Red for 1st, Blue for 2nd
-markers = {'o', 's', '^', 'd'};
+% Plot Corner-based sag (original method)
+plotComparativeSag(T, resultsFolder, 'SagPct_ofMeasuredHeight', 'Corner', '_corner');
 
-for c = 1:numel(conditions)
-    condName = conditions{c};
-    % Filter data for this condition
-    mask = strcmp(T_sag_stats.Condition, condName);
-    subT = T_sag_stats(mask, :);
-    
-    if isempty(subT), continue; end
-    
-    % Pick style
-    col = colors{mod(c-1, numel(colors))+1};
-    mk  = markers{mod(c-1, numel(markers))+1};
-    
-    % 3D Scatter
-    scatter3(subT.Width_px, subT.Roof_layers, subT.mean_SagPct_ofMeasuredHeight, ...
-             80, col, mk, 'filled', 'DisplayName', condName);
-         
-    % Error bars (manual vertical lines)
-    for j = 1:height(subT)
-        x = subT.Width_px(j);
-        y = subT.Roof_layers(j);
-        z = subT.mean_SagPct_ofMeasuredHeight(j);
-        err = subT.std_SagPct_ofMeasuredHeight(j);
-        if ~isnan(err)
-            plot3([x x], [y y], [z-err z+err], '-', 'Color', col, 'LineWidth', 1, 'HandleVisibility','off');
-        end
-    end
-end
+% Plot BoundingBox-based sag (new method)
+plotComparativeSag(T, resultsFolder, 'SagBB_Pct_ofMeasuredHeight', 'BoundingBox', '_BB');
 
-xlabel('Width (printer px)');
-ylabel('Roof Layers');
-zlabel('Sag (% of Measured Height)');
-title('Comparative Sag Analysis: Default vs PreOptimized');
-grid on; view(45, 30);
-legend('show', 'Location', 'best');
-hold off;
-
-% Save summary figure
-saveas(gcf, fullfile(rootDir, 'sag_depth_comparison.png'));
-
+% You could also plot other metrics easily:
+% plotComparativeSag(T, resultsFolder, 'SagPct_ofTheoreticalHeight', 'Corner (vs Theoretical)', '_theo');
 
 % FIGURE 2: Comparative Wall Tilt
-figure('Position', [150 150 1000 700]);
-T_tilt_stats = groupsummary(T, {'Width_px', 'Roof_layers', 'Condition'}, {'mean', 'std'}, 'AvgWallTiltAngle_deg');
-valid_tilt = ~isnan(T_tilt_stats.mean_AvgWallTiltAngle_deg);
-T_tilt_stats = T_tilt_stats(valid_tilt, :);
-
-hold on;
-for c = 1:numel(conditions)
-    condName = conditions{c};
-    mask = strcmp(T_tilt_stats.Condition, condName);
-    subT = T_tilt_stats(mask, :);
-    if isempty(subT), continue; end
-    
-    col = colors{mod(c-1, numel(colors))+1};
-    mk  = markers{mod(c-1, numel(markers))+1};
-    
-    scatter3(subT.Width_px, subT.Roof_layers, subT.mean_AvgWallTiltAngle_deg, ...
-             80, col, mk, 'filled', 'DisplayName', condName);
-         
-    for j = 1:height(subT)
-        x = subT.Width_px(j);
-        y = subT.Roof_layers(j);
-        z = subT.mean_AvgWallTiltAngle_deg(j);
-        err = subT.std_AvgWallTiltAngle_deg(j);
-        if ~isnan(err)
-            plot3([x x], [y y], [z-err z+err], '-', 'Color', col, 'LineWidth', 1, 'HandleVisibility','off');
-        end
-    end
-end
-
-xlabel('Width (printer px)');
-ylabel('Roof Layers');
-zlabel('Wall Tilt (°)');
-title('Comparative Wall Tilt Angle');
-grid on; view(45, 30);
-legend('show', 'Location', 'best');
-hold off;
+plotWallTilt(T, resultsFolder)
 
 %% SAVE FINAL RESULTS
-outCsv = fullfile(rootDir, 'image_scale_results.csv');
+outCsv = fullfile(resultsFolder, 'image_scale_results.csv');
 writetable(T, outCsv);
 fprintf('Saved (final): %s\n', outCsv);
 

@@ -1,20 +1,44 @@
 function fig = measureMembraneSag_debugFigure(BW, sagMetrics, fileName)
 % Generate debug figure for sag analysis (without displaying)
 % Returns figure handle for saving
+% Updated to support both Corner-based and BB-based baselines
 
-    fig = figure('Position', [50 50 1500 700], 'Visible', 'off');
+    fig = figure('Position', [50 50 1600 700], 'Visible', 'off');
     
     % Get profiles from sagMetrics
     p = sagMetrics.profiles;
     topSmooth = p.topSmooth;
     bottomSmooth = p.bottomSmooth;
     topFitted = p.topFitted;
-    baselineIdeal = p.baselineIdeal;
     xRange = p.xCoords;
     bottomFloor_Y = p.bottomFloor_Y;
-    idealTop_Y = p.idealTop_Y;
     leftCornerIdx = p.leftCornerIdx;
     rightCornerIdx = p.rightCornerIdx;
+    
+    % Handle both old (baselineIdeal) and new (baselineCorner/baselineBB) field names
+    if isfield(p, 'baselineCorner')
+        baselineCorner = p.baselineCorner;
+        baselineBB = p.baselineBB;
+        idealTop_Y_corner = p.idealTop_Y_corner;
+        idealTop_Y_bb = p.idealTop_Y_bb;
+        hasDualBaseline = true;
+    elseif isfield(p, 'baselineIdeal')
+        % Backward compatibility with old format
+        baselineCorner = p.baselineIdeal;
+        baselineBB = p.baselineIdeal;
+        idealTop_Y_corner = p.idealTop_Y;
+        idealTop_Y_bb = p.idealTop_Y;
+        hasDualBaseline = false;
+    else
+        error('No baseline field found in sagMetrics.profiles');
+    end
+    
+    % For backward compatibility
+    if isfield(p, 'idealTop_Y')
+        idealTop_Y = p.idealTop_Y;
+    else
+        idealTop_Y = idealTop_Y_corner;
+    end
     
     % Bounding box
     rp = regionprops(BW, 'BoundingBox');
@@ -45,12 +69,23 @@ function fig = measureMembraneSag_debugFigure(BW, sagMetrics, fileName)
     leftCornerY = sagMetrics.leftCornerY;
     rightCornerY = sagMetrics.rightCornerY;
     
-    % Parabola vertex
-    xVertexIdx = round((leftCornerIdx + rightCornerIdx) / 2);  % Approximate
-    yVertex = idealTop_Y + sagMetrics.sagDepth_px;
+    % Parabola vertex (approximate position)
+    xVertexIdx = round((leftCornerIdx + rightCornerIdx) / 2);
+    yVertex = idealTop_Y_corner + sagMetrics.sagDepth_px;
     xVertexInImage = xRange(1) + xVertexIdx - 1;
     
-    % ===== SUBPLOT 1: Zoomed mask =====
+    % Get BB-based sag values (with fallback for old data)
+    if isfield(sagMetrics, 'sagDepthBB_px')
+        sagDepthBB_px = sagMetrics.sagDepthBB_px;
+        sagDepthBB_mm = sagMetrics.sagDepthBB_mm;
+        sagBB_Pct_ofMeasuredHeight = sagMetrics.sagBB_Pct_ofMeasuredHeight;
+    else
+        sagDepthBB_px = sagMetrics.sagDepth_px;
+        sagDepthBB_mm = sagMetrics.sagDepth_mm;
+        sagBB_Pct_ofMeasuredHeight = sagMetrics.sagPct_ofMeasuredHeight;
+    end
+    
+    % ===== SUBPLOT 1: Zoomed mask with both baselines =====
     subplot(1, 2, 1);
     imshow(BWcropped); hold on;
     
@@ -61,38 +96,68 @@ function fig = measureMembraneSag_debugFigure(BW, sagMetrics, fileName)
     % Top edge
     plot(xRange - offsetX, topSmooth - offsetY, 'b-', 'LineWidth', 2);
     
-    % Baseline
-    plot(xRange - offsetX, baselineIdeal - offsetY, 'g-', 'LineWidth', 2);
+    % Corner-based baseline (green)
+    plot(xRange - offsetX, baselineCorner - offsetY, 'g-', 'LineWidth', 2);
+    
+    % BB-based baseline (cyan) - only if different from corner baseline
+    if hasDualBaseline
+        plot(xRange - offsetX, baselineBB - offsetY, 'c-', 'LineWidth', 2);
+    end
     
     % Bottom edge between corners
     xBetween = xRange(leftCornerIdx:rightCornerIdx);
     bottomBetween = bottomSmooth(leftCornerIdx:rightCornerIdx);
-    plot(xBetween - offsetX, bottomBetween - offsetY, 'c-', 'LineWidth', 1.5);
+    plot(xBetween - offsetX, bottomBetween - offsetY, 'm-', 'LineWidth', 1.5);
     
     % Bottom floor line
     plot([xRange(leftCornerIdx) xRange(rightCornerIdx)] - offsetX, ...
-         [bottomFloor_Y bottomFloor_Y] - offsetY, 'c--', 'LineWidth', 2);
+         [bottomFloor_Y bottomFloor_Y] - offsetY, 'm--', 'LineWidth', 2);
     
     % Corners
-    plot(leftCornerX - offsetX, leftCornerY - offsetY, 'go', 'MarkerSize', 12, 'LineWidth', 3, 'MarkerFaceColor', 'g');
-    plot(rightCornerX - offsetX, rightCornerY - offsetY, 'go', 'MarkerSize', 12, 'LineWidth', 3, 'MarkerFaceColor', 'g');
+    plot(leftCornerX - offsetX, leftCornerY - offsetY, 'go', ...
+         'MarkerSize', 12, 'LineWidth', 3, 'MarkerFaceColor', 'g');
+    plot(rightCornerX - offsetX, rightCornerY - offsetY, 'go', ...
+         'MarkerSize', 12, 'LineWidth', 3, 'MarkerFaceColor', 'g');
     
     % Vertex
-    plot(xVertexInImage - offsetX, yVertex - offsetY, 'r^', 'MarkerSize', 12, 'LineWidth', 3, 'MarkerFaceColor', 'r');
+    plot(xVertexInImage - offsetX, yVertex - offsetY, 'r^', ...
+         'MarkerSize', 12, 'LineWidth', 3, 'MarkerFaceColor', 'r');
     
-    % Sag depth line
-    plot([xVertexInImage xVertexInImage] - offsetX, [idealTop_Y yVertex] - offsetY, 'm-', 'LineWidth', 3);
+    % Sag depth line (corner baseline)
+    plot([xVertexInImage xVertexInImage] - offsetX, ...
+         [idealTop_Y_corner yVertex] - offsetY, 'g-', 'LineWidth', 3);
     
-    % Sag area fill
+    % Sag depth line (BB baseline) - offset slightly for visibility
+    if hasDualBaseline
+        plot([xVertexInImage-3 xVertexInImage-3] - offsetX, ...
+             [idealTop_Y_bb yVertex] - offsetY, 'c-', 'LineWidth', 3);
+    end
+    
+    % Sag area fill (corner-based)
     xFill = xRange(leftCornerIdx:rightCornerIdx) - offsetX;
     yTop = topSmooth(leftCornerIdx:rightCornerIdx) - offsetY;
-    yBase = baselineIdeal(leftCornerIdx:rightCornerIdx) - offsetY;
-    fill([xFill fliplr(xFill)], [yTop fliplr(yBase)], 'r', 'FaceAlpha', 0.25, 'EdgeColor', 'none');
+    yBaseCorner = baselineCorner(leftCornerIdx:rightCornerIdx) - offsetY;
+    fill([xFill fliplr(xFill)], [yTop fliplr(yBaseCorner)], 'g', ...
+         'FaceAlpha', 0.15, 'EdgeColor', 'none');
     
-    title(sprintf('Sag: %.1f px (%.3f mm)\nH: %.1f%% | W: %.1f%% | Area: %.1f%%', ...
-                  sagMetrics.sagDepth_px, sagMetrics.sagDepth_mm, ...
-                  sagMetrics.heightPct_ofTheoretical, sagMetrics.widthPct_ofTheoretical, ...
-                  sagMetrics.areaPct_ofTheoretical), 'FontSize', 10);
+    % Additional fill between baselines (if dual baseline)
+    if hasDualBaseline
+        yBaseBB = baselineBB(leftCornerIdx:rightCornerIdx) - offsetY;
+        fill([xFill fliplr(xFill)], [yBaseCorner fliplr(yBaseBB)], 'c', ...
+             'FaceAlpha', 0.15, 'EdgeColor', 'none');
+    end
+    
+    % Title with both sag values
+    if hasDualBaseline
+        title(sprintf('Corner Sag: %.1f px (%.3f mm) = %.1f%% H\nBB Sag: %.1f px (%.3f mm) = %.1f%% H', ...
+                      sagMetrics.sagDepth_px, sagMetrics.sagDepth_mm, sagMetrics.sagPct_ofMeasuredHeight, ...
+                      sagDepthBB_px, sagDepthBB_mm, sagBB_Pct_ofMeasuredHeight), 'FontSize', 10);
+    else
+        title(sprintf('Sag: %.1f px (%.3f mm)\nH: %.1f%% | W: %.1f%% | Area: %.1f%%', ...
+                      sagMetrics.sagDepth_px, sagMetrics.sagDepth_mm, ...
+                      sagMetrics.heightPct_ofTheoretical, sagMetrics.widthPct_ofTheoretical, ...
+                      sagMetrics.areaPct_ofTheoretical), 'FontSize', 10);
+    end
     axis tight;
     hold off;
     
@@ -101,42 +166,90 @@ function fig = measureMembraneSag_debugFigure(BW, sagMetrics, fileName)
     xCoords = 1:length(topSmooth);
     
     plot(xCoords, topSmooth, 'b-', 'LineWidth', 2); hold on;
-    plot(xCoords, baselineIdeal, 'g-', 'LineWidth', 2);
+    plot(xCoords, baselineCorner, 'g-', 'LineWidth', 2);
+    
+    if hasDualBaseline
+        plot(xCoords, baselineBB, 'c-', 'LineWidth', 2);
+    end
     
     if ~isempty(topFitted) && ~all(isnan(topFitted))
         plot(xCoords, topFitted, 'r:', 'LineWidth', 2);
     end
     
-    plot(leftCornerIdx:rightCornerIdx, bottomSmooth(leftCornerIdx:rightCornerIdx), 'c-', 'LineWidth', 1.5);
-    plot([leftCornerIdx rightCornerIdx], [bottomFloor_Y bottomFloor_Y], 'c--', 'LineWidth', 2);
+    % Bottom edge
+    plot(leftCornerIdx:rightCornerIdx, bottomSmooth(leftCornerIdx:rightCornerIdx), 'm-', 'LineWidth', 1.5);
+    plot([leftCornerIdx rightCornerIdx], [bottomFloor_Y bottomFloor_Y], 'm--', 'LineWidth', 2);
     
+    % Corners
     plot(leftCornerIdx, leftCornerY, 'go', 'MarkerSize', 10, 'LineWidth', 3, 'MarkerFaceColor', 'g');
     plot(rightCornerIdx, rightCornerY, 'go', 'MarkerSize', 10, 'LineWidth', 3, 'MarkerFaceColor', 'g');
     
+    % Vertex
     plot(xVertexIdx, yVertex, 'r^', 'MarkerSize', 10, 'LineWidth', 2, 'MarkerFaceColor', 'r');
-    plot([xVertexIdx xVertexIdx], [idealTop_Y yVertex], 'm-', 'LineWidth', 3);
+    plot([xVertexIdx xVertexIdx], [idealTop_Y_corner yVertex], 'g-', 'LineWidth', 3);
+    
+    if hasDualBaseline
+        plot([xVertexIdx+2 xVertexIdx+2], [idealTop_Y_bb yVertex], 'c-', 'LineWidth', 3);
+    end
+    
+    % Height reference line
+    midIdx = round((leftCornerIdx + rightCornerIdx) / 2);
+    plot([midIdx midIdx], [idealTop_Y_bb bottomFloor_Y], 'k-', 'LineWidth', 2);
     
     % Sag area fill
     xFillPlot = leftCornerIdx:rightCornerIdx;
-    fill([xFillPlot fliplr(xFillPlot)], [topSmooth(xFillPlot) fliplr(baselineIdeal(xFillPlot))], ...
-         'r', 'FaceAlpha', 0.2, 'EdgeColor', 'none');
+    fill([xFillPlot fliplr(xFillPlot)], [topSmooth(xFillPlot) fliplr(baselineCorner(xFillPlot))], ...
+         'g', 'FaceAlpha', 0.15, 'EdgeColor', 'none');
+    
+    if hasDualBaseline
+        fill([xFillPlot fliplr(xFillPlot)], [baselineCorner(xFillPlot) fliplr(baselineBB(xFillPlot))], ...
+             'c', 'FaceAlpha', 0.15, 'EdgeColor', 'none');
+    end
     
     set(gca, 'YDir', 'reverse');
     xlabel('Position (px)');
     ylabel('Y (px)');
     grid on;
     
+    % Legend
+    if hasDualBaseline
+        legend({'Top edge', 'Baseline (Corner)', 'Baseline (BB)', ...
+                sprintf('Parabola (R^2=%.3f)', sagMetrics.parabolaR2), ...
+                'Bottom edge', 'Bottom floor', 'Corners', '', ...
+                'Vertex', 'Sag (Corner)', 'Sag (BB)'}, ...
+               'Location', 'southeast', 'FontSize', 7);
+    else
+        legend({'Top edge', 'Baseline', sprintf('Parabola (R^2=%.3f)', sagMetrics.parabolaR2), ...
+                'Bottom edge', 'Bottom floor', 'Corners', '', 'Vertex', 'Sag'}, ...
+               'Location', 'southeast', 'FontSize', 8);
+    end
+    
     title(sprintf('Profile (R² = %.3f)', sagMetrics.parabolaR2), 'FontSize', 10);
     hold off;
     
     % Main title
-    sgtitle(sprintf(['%s\n' ...
-        'Sag: %.1f px = %.3f mm | %.1f%% of H_{meas} | %.1f%% of H_{theo} | %.1f%% of width span\n' ...
-        'Height: meas=%.0fpx, theo=%.0fpx (%.1f%%) | Width: meas=%.0fpx, theo=%.0fpx (%.1f%%)'], ...
-        fileName, ...
-        sagMetrics.sagDepth_px, sagMetrics.sagDepth_mm, ...
-        sagMetrics.sagPct_ofMeasuredHeight, sagMetrics.sagPct_ofTheoreticalHeight, sagMetrics.sagPct_ofWidthSpan, ...
-        sagMetrics.measuredHeight_px, sagMetrics.theoreticalHeight_px, sagMetrics.heightPct_ofTheoretical, ...
-        sagMetrics.measuredWidth_px, sagMetrics.theoreticalWidth_px, sagMetrics.widthPct_ofTheoretical), ...
-        'FontSize', 9, 'FontWeight', 'bold', 'Interpreter', 'none');
+    if hasDualBaseline
+        sgtitle(sprintf(['%s\n' ...
+            'Corner Sag: %.1f px = %.3f mm | %.1f%% of H_{meas} | %.1f%% of H_{theo}\n' ...
+            'BB Sag: %.1f px = %.3f mm | %.1f%% of H_{meas}\n' ...
+            'Height: %.0fpx (%.1f%%) | Width: %.0fpx (%.1f%%) | Baseline Diff: %.1f px'], ...
+            fileName, ...
+            sagMetrics.sagDepth_px, sagMetrics.sagDepth_mm, ...
+            sagMetrics.sagPct_ofMeasuredHeight, sagMetrics.sagPct_ofTheoreticalHeight, ...
+            sagDepthBB_px, sagDepthBB_mm, sagBB_Pct_ofMeasuredHeight, ...
+            sagMetrics.measuredHeight_px, sagMetrics.heightPct_ofTheoretical, ...
+            sagMetrics.measuredWidth_px, sagMetrics.widthPct_ofTheoretical, ...
+            sagMetrics.baselineDiff_px), ...
+            'FontSize', 9, 'FontWeight', 'bold', 'Interpreter', 'none');
+    else
+        sgtitle(sprintf(['%s\n' ...
+            'Sag: %.1f px = %.3f mm | %.1f%% of H_{meas} | %.1f%% of H_{theo} | %.1f%% of width span\n' ...
+            'Height: meas=%.0fpx, theo=%.0fpx (%.1f%%) | Width: meas=%.0fpx, theo=%.0fpx (%.1f%%)'], ...
+            fileName, ...
+            sagMetrics.sagDepth_px, sagMetrics.sagDepth_mm, ...
+            sagMetrics.sagPct_ofMeasuredHeight, sagMetrics.sagPct_ofTheoreticalHeight, sagMetrics.sagPct_ofWidthSpan, ...
+            sagMetrics.measuredHeight_px, sagMetrics.theoreticalHeight_px, sagMetrics.heightPct_ofTheoretical, ...
+            sagMetrics.measuredWidth_px, sagMetrics.theoreticalWidth_px, sagMetrics.widthPct_ofTheoretical), ...
+            'FontSize', 9, 'FontWeight', 'bold', 'Interpreter', 'none');
+    end
 end

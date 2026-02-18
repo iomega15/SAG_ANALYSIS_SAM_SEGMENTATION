@@ -1,14 +1,7 @@
 function sagMetrics = measureMembraneSag(BW, mmPerPx, debugPlot, H_layers, Width_printer_pixels, layerHeight_mm, pixelWidth_mm)
-% MEASUREMEMBRANESAG Quantify membrane sag from binary lumen mask
-%
-% Inputs:
-%   BW                    - Binary mask of lumen
-%   mmPerPx               - mm per pixel calibration (from microscope)
-%   debugPlot             - true/false for visualization
-%   H_layers              - Theoretical height in layers (from filename)
-%   Width_printer_pixels  - Theoretical width in printer pixels (from filename)
-%   layerHeight_mm        - Layer height in mm (default: 0.05)
-%   pixelWidth_mm         - Printer XY pixel size in mm (default: 0.032)
+% MEASUREMEMBRANESAG Quantify membrane sag using two baseline methods:
+%   1. Corner-based: min(leftCornerY, rightCornerY) from smoothed top edge
+%   2. BoundingBox-based: top of bounding box (bbTop)
 
     % Defaults
     if nargin < 3 || isempty(debugPlot), debugPlot = false; end
@@ -17,15 +10,11 @@ function sagMetrics = measureMembraneSag(BW, mmPerPx, debugPlot, H_layers, Width
     if nargin < 6 || isempty(layerHeight_mm), layerHeight_mm = 0.05; end
     if nargin < 7 || isempty(pixelWidth_mm), pixelWidth_mm = 0.032; end
     
-    % Initialize output with all NaN
     sagMetrics = initializeSagMetrics();
     
-    %% 1. GET BOUNDING BOX
+    %% 1. GET BOUNDING BOX (The Source of Truth for Corners)
     rp = regionprops(BW, 'Area', 'BoundingBox', 'ConvexArea');
-    if isempty(rp)
-        warning('No regions found in mask');
-        return;
-    end
+    if isempty(rp), warning('No regions found in mask'); return; end
     [~, k] = max([rp.Area]);
     bb = rp(k).BoundingBox;
     
@@ -42,7 +31,6 @@ function sagMetrics = measureMembraneSag(BW, mmPerPx, debugPlot, H_layers, Width
     
     %% 2. EXTRACT EDGE PROFILES
     [nRows, nCols] = size(BW);
-    
     topEdge = nan(1, nCols);
     bottomEdge = nan(1, nCols);
     
@@ -55,299 +43,214 @@ function sagMetrics = measureMembraneSag(BW, mmPerPx, debugPlot, H_layers, Width
     end
     
     validCols = find(~isnan(topEdge));
-    if numel(validCols) < 20
-        warning('Insufficient lumen pixels detected');
-        return;
-    end
+    if numel(validCols) < 10, warning('Lumen too small'); return; end
     
     xMin = validCols(1);
     xMax = validCols(end);
     xRange = xMin:xMax;
     
-    topProfile = topEdge(xRange);
-    bottomProfile = bottomEdge(xRange);
-    
-    topProfile = fillmissing(topProfile, 'linear');
-    bottomProfile = fillmissing(bottomProfile, 'linear');
+    topProfile = fillmissing(topEdge(xRange), 'linear');
+    bottomProfile = fillmissing(bottomEdge(xRange), 'linear');
     
     %% 3. SMOOTH
     windowSize = max(5, round(length(topProfile) / 30));
     topSmooth = movmedian(topProfile, windowSize);
     bottomSmooth = movmedian(bottomProfile, windowSize);
     
-    %% 4. FIND CORNERS (UNIFIED: works for both peaked and plateau)
-    [leftCornerIdx, rightCornerIdx, cornerType] = findCornersUnified(topSmooth);
-    % Get Y values at corners
+    %% 4. DEFINE CORNERS (Using Bounding Box Limits)
+    leftCornerIdx = max(1, bbLeft - xRange(1) + 1);
+    rightCornerIdx = min(length(topSmooth), bbRight - xRange(1) + 1);
+    
     leftCornerY = topSmooth(leftCornerIdx);
     rightCornerY = topSmooth(rightCornerIdx);
-    
-    % Get X positions in image coordinates
     leftCornerX = xRange(leftCornerIdx);
     rightCornerX = xRange(rightCornerIdx);
     
-    %% 5. BOTTOM FLOOR (median between corners only)
+    roofRegion = topSmooth(leftCornerIdx:rightCornerIdx);
+    if (max(roofRegion) - min(roofRegion)) / length(roofRegion) < 0.1
+        cornerType = 'plateau';
+    else
+        cornerType = 'peaked';
+    end
+    
+    %% 5. BOTTOM FLOOR
     bottomBetweenCorners = bottomSmooth(leftCornerIdx:rightCornerIdx);
     bottomFloor_Y = median(bottomBetweenCorners);
     
     %% 6. FIT PARABOLA
     xFit = leftCornerIdx:rightCornerIdx;
     yFit = topSmooth(xFit);
-    nFitPoints = length(xFit);
     xCentered = xFit - mean(xFit);
     
     try
         p = polyfit(xCentered, yFit, 2);
-        a_coeff = p(1);
-        b_coeff = p(2);
-        
-        xVertexCentered = -b_coeff / (2 * a_coeff);
+        xVertexCentered = -p(2) / (2 * p(1));
         yVertex = polyval(p, xVertexCentered);
+        
         xVertexIdx = round(xVertexCentered + mean(xFit));
         xVertexIdx = max(1, min(length(topSmooth), xVertexIdx));
         xVertexInImage = xRange(1) + xVertexIdx - 1;
         
-        xCenteredFull = (1:length(topSmooth)) - mean(xFit);
-        topFitted = polyval(p, xCenteredFull);
-        
-        yFittedRegion = polyval(p, xCentered);
-        SS_res = sum((yFit - yFittedRegion).^2);
-        SS_tot = sum((yFit - mean(yFit)).^2);
-        R2 = 1 - SS_res / SS_tot;
-        
+        topFitted = polyval(p, (1:length(topSmooth)) - mean(xFit));
+        R2 = 1 - sum((yFit - polyval(p, xCentered)).^2) / sum((yFit - mean(yFit)).^2);
         parabolaFitValid = true;
     catch
-        a_coeff = NaN;
-        xVertexIdx = NaN; xVertexInImage = NaN; yVertex = NaN;
-        topFitted = nan(size(topSmooth));
-        R2 = NaN;
-        parabolaFitValid = false;
+        parabolaFitValid = false; R2 = NaN; topFitted = nan(size(topSmooth));
+        yVertex = NaN; xVertexIdx = NaN; xVertexInImage = NaN;
     end
     
-    %% 7. BASELINE (horizontal at higher corner)
-    idealTop_Y = min(leftCornerY, rightCornerY);
-    baselineIdeal = ones(1, length(topSmooth)) * idealTop_Y;
+    %% 7. BASELINES (Two Methods)
+    % Method 1: Corner-based (original) - uses higher of two corners
+    idealTop_Y_corner = min(leftCornerY, rightCornerY);
+    baselineCorner = ones(1, length(topSmooth)) * idealTop_Y_corner;
     
-    %% 8. THEORETICAL DIMENSIONS
-    % Height: layers × layer height → convert to image pixels
-    if ~isnan(H_layers) && ~isnan(layerHeight_mm) && ~isnan(mmPerPx)
-        theoreticalHeight_mm = H_layers * layerHeight_mm;
-        theoreticalHeight_px = theoreticalHeight_mm / mmPerPx;
-    else
-        theoreticalHeight_mm = NaN;
-        theoreticalHeight_px = NaN;
-    end
+    % Method 2: BoundingBox-based (new) - uses absolute top of bounding box
+    idealTop_Y_bb = bbTop;
+    baselineBB = ones(1, length(topSmooth)) * idealTop_Y_bb;
     
-    % Width: printer pixels × printer pixel size → convert to image pixels
-    if ~isnan(Width_printer_pixels) && ~isnan(pixelWidth_mm) && ~isnan(mmPerPx)
-        theoreticalWidth_mm = Width_printer_pixels * pixelWidth_mm;
-        theoreticalWidth_px = theoreticalWidth_mm / mmPerPx;
-    else
-        theoreticalWidth_mm = NaN;
-        theoreticalWidth_px = NaN;
-    end
-    
-    %% 9. MEASURED DIMENSIONS (USE BOUNDING BOX for comparison with theoretical)
-    % Bounding box represents the full extent of the lumen
+    %% 8. THEORETICAL & MEASURED DIMENSIONS
+    theoreticalHeight_px = (H_layers * layerHeight_mm) / mmPerPx;
+    theoreticalWidth_px = (Width_printer_pixels * pixelWidth_mm) / mmPerPx;
     measuredHeight_px = bbHeight;
     measuredHeight_mm = bbHeight * mmPerPx;
-    
     measuredWidth_px = bbWidth;
     measuredWidth_mm = bbWidth * mmPerPx;
-    
-    % Span width between corners (for sag analysis only)
     spanWidth_px = rightCornerIdx - leftCornerIdx;
-    spanWidth_mm = spanWidth_px * mmPerPx;
     
-    %% 10. SAG DEPTH
+    %% 9. SAG DEPTH & AREA (Both Methods)
+    isVertexBetween = (xVertexIdx >= leftCornerIdx) && (xVertexIdx <= rightCornerIdx);
+    isVertexLowerLeft = (yVertex > leftCornerY);
+    isVertexLowerRight = (yVertex > rightCornerY);
+    
+    % === METHOD 1: CORNER-BASED SAG (Original) ===
     if parabolaFitValid
-        sagDepth_px = yVertex - idealTop_Y;
+        sagDepth_corner_px = yVertex - idealTop_Y_corner;
     else
-        [troughY, ~] = max(topSmooth(leftCornerIdx:rightCornerIdx));
-        sagDepth_px = troughY - idealTop_Y;
+        sagDepth_corner_px = max(topSmooth(leftCornerIdx:rightCornerIdx)) - idealTop_Y_corner;
     end
-    sagDepth_mm = sagDepth_px * mmPerPx;
+    sagArea_corner_px2 = trapz(max(0, topSmooth(leftCornerIdx:rightCornerIdx) - baselineCorner(leftCornerIdx:rightCornerIdx)));
     
-    % Sag area
-    sagRegion = topSmooth(leftCornerIdx:rightCornerIdx);
-    baselineRegion = baselineIdeal(leftCornerIdx:rightCornerIdx);
-    sagArea_px2 = trapz(max(0, sagRegion - baselineRegion));
-    sagArea_mm2 = sagArea_px2 * mmPerPx^2;
+    % === METHOD 2: BOUNDING BOX-BASED SAG (New) ===
+    if parabolaFitValid
+        sagDepth_bb_px = yVertex - idealTop_Y_bb;
+    else
+        sagDepth_bb_px = max(topSmooth(leftCornerIdx:rightCornerIdx)) - idealTop_Y_bb;
+    end
+    sagArea_bb_px2 = trapz(max(0, topSmooth(leftCornerIdx:rightCornerIdx) - baselineBB(leftCornerIdx:rightCornerIdx)));
     
-    %% 11. WALL TILT (relative to bounding box)
+    %% 10. WALL TILT
     leftWallInward_px = leftCornerX - bbLeft;
     rightWallInward_px = bbRight - rightCornerX;
-    totalWallInward_px = leftWallInward_px + rightWallInward_px;
     
-    leftWallInward_mm = leftWallInward_px * mmPerPx;
-    rightWallInward_mm = rightWallInward_px * mmPerPx;
+    leftWallTiltAngle_deg = atand(leftWallInward_px / max(1, measuredHeight_px));
+    rightWallTiltAngle_deg = atand(rightWallInward_px / max(1, measuredHeight_px));
     
-    if measuredHeight_px > 0
-        leftWallTiltAngle_deg = atand(leftWallInward_px / measuredHeight_px);
-        rightWallTiltAngle_deg = atand(rightWallInward_px / measuredHeight_px);
-    else
-        leftWallTiltAngle_deg = NaN;
-        rightWallTiltAngle_deg = NaN;
-    end
-    
-    %% 12. NORMALIZED METRICS
-    
-    % Sag relative to measured (bounding box) height
-    sagPct_ofMeasuredHeight = (sagDepth_px / measuredHeight_px) * 100;
-    
-    % Sag relative to theoretical height
-    if ~isnan(theoreticalHeight_px) && theoreticalHeight_px > 0
-        sagPct_ofTheoreticalHeight = (sagDepth_px / theoreticalHeight_px) * 100;
-    else
-        sagPct_ofTheoreticalHeight = NaN;
-    end
-    
-    % Sag relative to span width (width between corners)
-    sagPct_ofWidthSpan = (sagDepth_px / spanWidth_px) * 100;
-    
-    % Height: measured (BB) vs theoretical
-    if ~isnan(theoreticalHeight_px) && theoreticalHeight_px > 0
-        heightRatio = measuredHeight_px / theoreticalHeight_px;
-        heightPct_ofTheoretical = heightRatio * 100;
-    else
-        heightRatio = NaN;
-        heightPct_ofTheoretical = NaN;
-    end
-    
-    % Width: measured (BB) vs theoretical
-    if ~isnan(theoreticalWidth_px) && theoreticalWidth_px > 0
-        widthRatio = measuredWidth_px / theoreticalWidth_px;
-        widthPct_ofTheoretical = widthRatio * 100;
-    else
-        widthRatio = NaN;
-        widthPct_ofTheoretical = NaN;
-    end
-    
-    % Wall tilt as % of theoretical width
-    if ~isnan(theoreticalWidth_px)
-        totalTiltPct_ofTheoWidth = (totalWallInward_px / theoreticalWidth_px) * 100;
-    else
-        totalTiltPct_ofTheoWidth = NaN;
-    end
-    
-    % Area
-    areaRatio_actual_vs_BB = actualArea_px2 / bbArea_px2;
-    convexityRatio = actualArea_px2 / convexArea_px2;
-    
-    if ~isnan(theoreticalHeight_px) && ~isnan(theoreticalWidth_px)
-        theoreticalArea_px2 = theoreticalHeight_px * theoreticalWidth_px;
-        theoreticalArea_mm2 = theoreticalHeight_mm * theoreticalWidth_mm;
-        areaRatio_actual_vs_theo = actualArea_px2 / theoreticalArea_px2;
-        areaPct_ofTheoretical = areaRatio_actual_vs_theo * 100;
-    else
-        theoreticalArea_px2 = NaN;
-        theoreticalArea_mm2 = NaN;
-        areaRatio_actual_vs_theo = NaN;
-        areaPct_ofTheoretical = NaN;
-    end
-    
-    actualArea_mm2 = actualArea_px2 * mmPerPx^2;
-    bbArea_mm2 = bbArea_px2 * mmPerPx^2;
-    
-    %% 13. PACK OUTPUT
+    %% 11. PACK OUTPUT
     sagMetrics.valid = true;
-    
-    % Parabola
     sagMetrics.parabolaR2 = R2;
-    sagMetrics.parabolaCoeff_a = a_coeff;
-    sagMetrics.parabolaFitPoints = nFitPoints;
     
-    % Sag depth
-    sagMetrics.sagDepth_px = sagDepth_px;
-    sagMetrics.sagDepth_mm = sagDepth_mm;
-    sagMetrics.sagArea_px2 = sagArea_px2;
-    sagMetrics.sagArea_mm2 = sagArea_mm2;
+    % --- Corner-Based Sag (Original Method) ---
+    sagMetrics.sagDepth_px = sagDepth_corner_px;
+    sagMetrics.sagDepth_mm = sagDepth_corner_px * mmPerPx;
+    sagMetrics.sagArea_px2 = sagArea_corner_px2;
+    sagMetrics.sagArea_mm2 = sagArea_corner_px2 * (mmPerPx^2);
+    sagMetrics.sagPct_ofMeasuredHeight = (sagDepth_corner_px / measuredHeight_px) * 100;
+    sagMetrics.sagPct_ofTheoreticalHeight = (sagDepth_corner_px / theoreticalHeight_px) * 100;
+    sagMetrics.sagPct_ofWidthSpan = (sagDepth_corner_px / max(1, spanWidth_px)) * 100;
     
-    % Sag normalized
-    sagMetrics.sagPct_ofMeasuredHeight = sagPct_ofMeasuredHeight;
-    sagMetrics.sagPct_ofTheoreticalHeight = sagPct_ofTheoreticalHeight;
-    sagMetrics.sagPct_ofWidthSpan = sagPct_ofWidthSpan;
+    % --- BoundingBox-Based Sag (New Method) ---
+    sagMetrics.sagDepthBB_px = sagDepth_bb_px;
+    sagMetrics.sagDepthBB_mm = sagDepth_bb_px * mmPerPx;
+    sagMetrics.sagAreaBB_px2 = sagArea_bb_px2;
+    sagMetrics.sagAreaBB_mm2 = sagArea_bb_px2 * (mmPerPx^2);
+    sagMetrics.sagBB_Pct_ofMeasuredHeight = (sagDepth_bb_px / measuredHeight_px) * 100;
+    sagMetrics.sagBB_Pct_ofTheoreticalHeight = (sagDepth_bb_px / theoreticalHeight_px) * 100;
+    sagMetrics.sagBB_Pct_ofWidthSpan = (sagDepth_bb_px / max(1, spanWidth_px)) * 100;
     
-    % Height (using bounding box as measured)
+    % --- Baseline Reference Values ---
+    sagMetrics.baselineCorner_Y = idealTop_Y_corner;
+    sagMetrics.baselineBB_Y = idealTop_Y_bb;
+    sagMetrics.baselineDiff_px = idealTop_Y_corner - idealTop_Y_bb;  % How much lower corners are vs BB top
+    sagMetrics.baselineDiff_mm = (idealTop_Y_corner - idealTop_Y_bb) * mmPerPx;
+    
+    % Height measurements
     sagMetrics.measuredHeight_px = measuredHeight_px;
     sagMetrics.measuredHeight_mm = measuredHeight_mm;
     sagMetrics.theoreticalHeight_px = theoreticalHeight_px;
-    sagMetrics.theoreticalHeight_mm = theoreticalHeight_mm;
-    sagMetrics.heightPct_ofTheoretical = heightPct_ofTheoretical;
+    sagMetrics.theoreticalHeight_mm = theoreticalHeight_px * mmPerPx;
+    sagMetrics.heightPct_ofTheoretical = (measuredHeight_px / theoreticalHeight_px) * 100;
     
-    % Width (using bounding box as measured)
+    % Width measurements
     sagMetrics.measuredWidth_px = measuredWidth_px;
     sagMetrics.measuredWidth_mm = measuredWidth_mm;
     sagMetrics.theoreticalWidth_px = theoreticalWidth_px;
-    sagMetrics.theoreticalWidth_mm = theoreticalWidth_mm;
-    sagMetrics.widthPct_ofTheoretical = widthPct_ofTheoretical;
+    sagMetrics.theoreticalWidth_mm = theoreticalWidth_px * mmPerPx;
+    sagMetrics.widthPct_ofTheoretical = (measuredWidth_px / theoreticalWidth_px) * 100;
     
-    % Span width (between corners, for sag analysis)
+    % Span measurements
     sagMetrics.spanWidth_px = spanWidth_px;
-    sagMetrics.spanWidth_mm = spanWidth_mm;
+    sagMetrics.spanWidth_mm = spanWidth_px * mmPerPx;
     
     % Wall tilt
-    sagMetrics.leftWallInward_px = leftWallInward_px;
-    sagMetrics.leftWallInward_mm = leftWallInward_mm;
-    sagMetrics.rightWallInward_px = rightWallInward_px;
-    sagMetrics.rightWallInward_mm = rightWallInward_mm;
-    sagMetrics.totalWallInward_px = totalWallInward_px;
-    sagMetrics.totalWallInward_mm = totalWallInward_px * mmPerPx;
     sagMetrics.leftWallTiltAngle_deg = leftWallTiltAngle_deg;
     sagMetrics.rightWallTiltAngle_deg = rightWallTiltAngle_deg;
-    sagMetrics.avgWallTiltAngle_deg = mean([leftWallTiltAngle_deg, rightWallTiltAngle_deg]);
-    sagMetrics.totalTiltPct_ofTheoWidth = totalTiltPct_ofTheoWidth;
+    sagMetrics.avgWallTiltAngle_deg = mean([leftWallTiltAngle_deg, rightWallTiltAngle_deg], 'omitnan');
+    sagMetrics.totalWallInward_mm = (leftWallInward_px + rightWallInward_px) * mmPerPx;
     
-    % Area
-    sagMetrics.actualArea_px2 = actualArea_px2;
-    sagMetrics.actualArea_mm2 = actualArea_mm2;
-    sagMetrics.theoreticalArea_px2 = theoreticalArea_px2;
-    sagMetrics.theoreticalArea_mm2 = theoreticalArea_mm2;
-    sagMetrics.areaPct_ofTheoretical = areaPct_ofTheoretical;
-    sagMetrics.areaRatio_actual_vs_BB = areaRatio_actual_vs_BB;
-    sagMetrics.convexityRatio = convexityRatio;
+    % Area metrics
+    sagMetrics.actualArea_mm2 = actualArea_px2 * (mmPerPx^2);
+    sagMetrics.theoreticalArea_mm2 = (theoreticalHeight_px * theoreticalWidth_px) * (mmPerPx^2);
+    sagMetrics.areaPct_ofTheoretical = (actualArea_px2 / (theoreticalHeight_px * theoreticalWidth_px)) * 100;
+    sagMetrics.convexityRatio = actualArea_px2 / convexArea_px2;
     
-    % Corner positions
+    % Corner information
     sagMetrics.leftCornerX = leftCornerX;
     sagMetrics.rightCornerX = rightCornerX;
     sagMetrics.leftCornerY = leftCornerY;
     sagMetrics.rightCornerY = rightCornerY;
-
     sagMetrics.cornerType = cornerType;
     
-    % Profiles
+    % Validation flags
+    sagMetrics.isVertexBetween = isVertexBetween;
+    sagMetrics.isVertexLowerLeft = isVertexLowerLeft;
+    sagMetrics.isVertexLowerRight = isVertexLowerRight;
+    
+    % Profile data for debug figures
     sagMetrics.profiles.topSmooth = topSmooth;
     sagMetrics.profiles.bottomSmooth = bottomSmooth;
     sagMetrics.profiles.topFitted = topFitted;
-    sagMetrics.profiles.baselineIdeal = baselineIdeal;
+    sagMetrics.profiles.baselineCorner = baselineCorner;
+    sagMetrics.profiles.baselineBB = baselineBB;
     sagMetrics.profiles.xCoords = xRange;
     sagMetrics.profiles.bottomFloor_Y = bottomFloor_Y;
-    sagMetrics.profiles.idealTop_Y = idealTop_Y;
+    sagMetrics.profiles.idealTop_Y = idealTop_Y_corner;  % Keep for backward compatibility
+    sagMetrics.profiles.idealTop_Y_corner = idealTop_Y_corner;
+    sagMetrics.profiles.idealTop_Y_bb = idealTop_Y_bb;
     sagMetrics.profiles.leftCornerIdx = leftCornerIdx;
     sagMetrics.profiles.rightCornerIdx = rightCornerIdx;
-    
-    %% 14. DEBUG VISUALIZATION
+
+    %% 12. DEBUG VISUALIZATION
     if debugPlot
         plotSagDebug(BW, sagMetrics, bbLeft, bbTop, bbRight, bbBottom, bbWidth, bbHeight, ...
-                     xRange, topSmooth, bottomSmooth, topFitted, baselineIdeal, ...
+                     xRange, topSmooth, bottomSmooth, topFitted, baselineCorner, baselineBB, ...
                      leftCornerIdx, rightCornerIdx, leftCornerX, rightCornerX, ...
                      leftCornerY, rightCornerY, xVertexInImage, xVertexIdx, yVertex, ...
-                     idealTop_Y, bottomFloor_Y, parabolaFitValid, ...
-                     sagDepth_px, sagDepth_mm, ...
-                     measuredHeight_px, theoreticalHeight_px, heightPct_ofTheoretical, ...
-                     measuredWidth_px, theoreticalWidth_px, widthPct_ofTheoretical, ...
-                     spanWidth_px, R2, sagPct_ofMeasuredHeight, sagPct_ofTheoreticalHeight, ...
-                     sagPct_ofWidthSpan, areaPct_ofTheoretical);
+                     idealTop_Y_corner, idealTop_Y_bb, bottomFloor_Y, parabolaFitValid, ...
+                     sagDepth_corner_px, sagDepth_bb_px, ...
+                     sagMetrics.sagDepth_mm, sagMetrics.sagDepthBB_mm, ...
+                     measuredHeight_px, theoreticalHeight_px, sagMetrics.heightPct_ofTheoretical, ...
+                     measuredWidth_px, theoreticalWidth_px, sagMetrics.widthPct_ofTheoretical, ...
+                     spanWidth_px, R2, sagMetrics.sagPct_ofMeasuredHeight, ...
+                     sagMetrics.sagPct_ofTheoreticalHeight, sagMetrics.sagPct_ofWidthSpan, ...
+                     sagMetrics.sagBB_Pct_ofMeasuredHeight, sagMetrics.areaPct_ofTheoretical);
     end
 end
 
-%% HELPER: Initialize all fields with NaN
 function sagMetrics = initializeSagMetrics()
     sagMetrics.valid = false;
-    
     sagMetrics.parabolaR2 = NaN;
-    sagMetrics.parabolaCoeff_a = NaN;
-    sagMetrics.parabolaFitPoints = NaN;
     
+    % Corner-based sag measurements (original)
     sagMetrics.sagDepth_px = NaN;
     sagMetrics.sagDepth_mm = NaN;
     sagMetrics.sagArea_px2 = NaN;
@@ -356,183 +259,199 @@ function sagMetrics = initializeSagMetrics()
     sagMetrics.sagPct_ofTheoreticalHeight = NaN;
     sagMetrics.sagPct_ofWidthSpan = NaN;
     
+    % BoundingBox-based sag measurements (new)
+    sagMetrics.sagDepthBB_px = NaN;
+    sagMetrics.sagDepthBB_mm = NaN;
+    sagMetrics.sagAreaBB_px2 = NaN;
+    sagMetrics.sagAreaBB_mm2 = NaN;
+    sagMetrics.sagBB_Pct_ofMeasuredHeight = NaN;
+    sagMetrics.sagBB_Pct_ofTheoreticalHeight = NaN;
+    sagMetrics.sagBB_Pct_ofWidthSpan = NaN;
+    
+    % Baseline reference values
+    sagMetrics.baselineCorner_Y = NaN;
+    sagMetrics.baselineBB_Y = NaN;
+    sagMetrics.baselineDiff_px = NaN;
+    sagMetrics.baselineDiff_mm = NaN;
+    
+    % Height measurements
     sagMetrics.measuredHeight_px = NaN;
     sagMetrics.measuredHeight_mm = NaN;
     sagMetrics.theoreticalHeight_px = NaN;
     sagMetrics.theoreticalHeight_mm = NaN;
     sagMetrics.heightPct_ofTheoretical = NaN;
     
+    % Width measurements
     sagMetrics.measuredWidth_px = NaN;
     sagMetrics.measuredWidth_mm = NaN;
     sagMetrics.theoreticalWidth_px = NaN;
     sagMetrics.theoreticalWidth_mm = NaN;
     sagMetrics.widthPct_ofTheoretical = NaN;
     
+    % Span measurements
     sagMetrics.spanWidth_px = NaN;
     sagMetrics.spanWidth_mm = NaN;
     
-    sagMetrics.leftWallInward_px = NaN;
-    sagMetrics.leftWallInward_mm = NaN;
-    sagMetrics.rightWallInward_px = NaN;
-    sagMetrics.rightWallInward_mm = NaN;
-    sagMetrics.totalWallInward_px = NaN;
-    sagMetrics.totalWallInward_mm = NaN;
+    % Wall tilt
     sagMetrics.leftWallTiltAngle_deg = NaN;
     sagMetrics.rightWallTiltAngle_deg = NaN;
     sagMetrics.avgWallTiltAngle_deg = NaN;
-    sagMetrics.totalTiltPct_ofTheoWidth = NaN;
+    sagMetrics.totalWallInward_mm = NaN;
     
-    sagMetrics.actualArea_px2 = NaN;
+    % Area metrics
     sagMetrics.actualArea_mm2 = NaN;
-    sagMetrics.theoreticalArea_px2 = NaN;
     sagMetrics.theoreticalArea_mm2 = NaN;
     sagMetrics.areaPct_ofTheoretical = NaN;
-    sagMetrics.areaRatio_actual_vs_BB = NaN;
     sagMetrics.convexityRatio = NaN;
     
+    % Corner information
     sagMetrics.leftCornerX = NaN;
     sagMetrics.rightCornerX = NaN;
     sagMetrics.leftCornerY = NaN;
     sagMetrics.rightCornerY = NaN;
-
     sagMetrics.cornerType = '';
     
+    % Validation flags
+    sagMetrics.isVertexBetween = false;
+    sagMetrics.isVertexLowerLeft = false;
+    sagMetrics.isVertexLowerRight = false;
+    
+    % Profile data
     sagMetrics.profiles = struct();
 end
 
-%% HELPER: Debug plot
 function plotSagDebug(BW, sagMetrics, bbLeft, bbTop, bbRight, bbBottom, bbWidth, bbHeight, ...
-                      xRange, topSmooth, bottomSmooth, topFitted, baselineIdeal, ...
+                      xRange, topSmooth, bottomSmooth, topFitted, baselineCorner, baselineBB, ...
                       leftCornerIdx, rightCornerIdx, leftCornerX, rightCornerX, ...
                       leftCornerY, rightCornerY, xVertexInImage, xVertexIdx, yVertex, ...
-                      idealTop_Y, bottomFloor_Y, parabolaFitValid, ...
-                      sagDepth_px, sagDepth_mm, ...
+                      idealTop_Y_corner, idealTop_Y_bb, bottomFloor_Y, parabolaFitValid, ...
+                      sagDepth_corner_px, sagDepth_bb_px, ...
+                      sagDepth_corner_mm, sagDepth_bb_mm, ...
                       measHeight_px, theoHeight_px, heightPct, ...
                       measWidth_px, theoWidth_px, widthPct, ...
-                      spanWidth_px, R2, sagPct_H, sagPct_Htheo, sagPct_span, areaPct)
+                      spanWidth_px, R2, sagPct_H_corner, ...
+                      sagPct_Htheo_corner, sagPct_span_corner, ...
+                      sagPct_H_bb, areaPct)
     
     [nRows, nCols] = size(BW);
+    figure('Position', [50 50 1600 700]);
     
-    figure('Position', [50 50 1500 700]);
-    
-    % Zoom region
     pad = 30;
-    zoomLeft = max(1, bbLeft - pad);
-    zoomRight = min(nCols, bbRight + pad);
-    zoomTop = max(1, bbTop - pad);
-    zoomBottom = min(nRows, bbBottom + pad);
+    zoomLeft = max(1, bbLeft - pad); zoomRight = min(nCols, bbRight + pad);
+    zoomTop = max(1, bbTop - pad); zoomBottom = min(nRows, bbBottom + pad);
     
     BWcropped = BW(zoomTop:zoomBottom, zoomLeft:zoomRight);
-    offsetX = zoomLeft - 1;
-    offsetY = zoomTop - 1;
+    offsetX = zoomLeft - 1; offsetY = zoomTop - 1;
     
-    % ===== SUBPLOT 1: Zoomed mask =====
+    %% Panel 1: Mask with both baselines
     subplot(1, 2, 1);
     imshow(BWcropped); hold on;
     
-    % Bounding box (yellow dashed)
+    % Bounding box
     rectangle('Position', [bbLeft-offsetX, bbTop-offsetY, bbWidth, bbHeight], ...
               'EdgeColor', 'y', 'LineWidth', 2, 'LineStyle', '--');
     
-    % Top edge (blue)
+    % Top edge profile
     plot(xRange - offsetX, topSmooth - offsetY, 'b-', 'LineWidth', 2);
     
-    % Baseline (green)
-    plot(xRange - offsetX, baselineIdeal - offsetY, 'g-', 'LineWidth', 2);
+    % Corner-based baseline (green)
+    plot(xRange - offsetX, baselineCorner - offsetY, 'g-', 'LineWidth', 2);
     
-    % Bottom edge ONLY between corners (cyan)
+    % BB-based baseline (cyan)
+    plot(xRange - offsetX, baselineBB - offsetY, 'c-', 'LineWidth', 2);
+    
+    % Bottom edge
     xBetween = xRange(leftCornerIdx:rightCornerIdx);
     bottomBetween = bottomSmooth(leftCornerIdx:rightCornerIdx);
-    plot(xBetween - offsetX, bottomBetween - offsetY, 'c-', 'LineWidth', 1.5);
-    
-    % Bottom floor line (cyan dashed)
+    plot(xBetween - offsetX, bottomBetween - offsetY, 'm-', 'LineWidth', 1.5);
     plot([xRange(leftCornerIdx) xRange(rightCornerIdx)] - offsetX, ...
-         [bottomFloor_Y bottomFloor_Y] - offsetY, 'c--', 'LineWidth', 2);
+         [bottomFloor_Y bottomFloor_Y] - offsetY, 'm--', 'LineWidth', 2);
     
-    % Corners (green circles)
+    % Corner markers
     plot(leftCornerX - offsetX, leftCornerY - offsetY, 'go', 'MarkerSize', 12, 'LineWidth', 3, 'MarkerFaceColor', 'g');
     plot(rightCornerX - offsetX, rightCornerY - offsetY, 'go', 'MarkerSize', 12, 'LineWidth', 3, 'MarkerFaceColor', 'g');
     
-    % Parabola vertex (red triangle)
+    % Vertex and sag lines
     if parabolaFitValid && ~isnan(yVertex)
         plot(xVertexInImage - offsetX, yVertex - offsetY, 'r^', 'MarkerSize', 12, 'LineWidth', 3, 'MarkerFaceColor', 'r');
-        % Sag depth line (magenta)
-        plot([xVertexInImage xVertexInImage] - offsetX, [idealTop_Y yVertex] - offsetY, 'm-', 'LineWidth', 3);
+        % Sag line to corner baseline (green)
+        plot([xVertexInImage xVertexInImage] - offsetX, [idealTop_Y_corner yVertex] - offsetY, 'g-', 'LineWidth', 3);
+        % Sag line to BB baseline (cyan)
+        plot([xVertexInImage-3 xVertexInImage-3] - offsetX, [idealTop_Y_bb yVertex] - offsetY, 'c-', 'LineWidth', 3);
     end
     
-    % Sag area fill (red transparent)
+    % Fill sag area (corner-based)
     xFill = xRange(leftCornerIdx:rightCornerIdx) - offsetX;
     yTop = topSmooth(leftCornerIdx:rightCornerIdx) - offsetY;
-    yBase = baselineIdeal(leftCornerIdx:rightCornerIdx) - offsetY;
-    fill([xFill fliplr(xFill)], [yTop fliplr(yBase)], 'r', 'FaceAlpha', 0.25, 'EdgeColor', 'none');
+    yBaseCorner = baselineCorner(leftCornerIdx:rightCornerIdx) - offsetY;
+    fill([xFill fliplr(xFill)], [yTop fliplr(yBaseCorner)], 'g', 'FaceAlpha', 0.15, 'EdgeColor', 'none');
     
-    % Title with key metrics
-    title(sprintf('Sag: %.1f px (%.3f mm)\nH: %.1f%% of theo | W: %.1f%% of theo | Area: %.1f%% of theo', ...
-                  sagDepth_px, sagDepth_mm, heightPct, widthPct, areaPct), 'FontSize', 10);
-    axis tight;
-    hold off;
+    % Fill sag area (BB-based)
+    yBaseBB = baselineBB(leftCornerIdx:rightCornerIdx) - offsetY;
+    fill([xFill fliplr(xFill)], [yBaseCorner fliplr(yBaseBB)], 'c', 'FaceAlpha', 0.15, 'EdgeColor', 'none');
     
-    % ===== SUBPLOT 2: Profile plot =====
+    legend({'BoundingBox', 'Top Edge', 'Baseline (Corner)', 'Baseline (BB)', ...
+            'Bottom Edge', 'Bottom Floor', 'Corners', '', 'Vertex', ...
+            'Sag (Corner)', 'Sag (BB)'}, ...
+           'Location', 'southeast', 'FontSize', 7);
+    
+    title(sprintf('Corner Sag: %.1f px (%.3f mm) = %.1f%% H\nBB Sag: %.1f px (%.3f mm) = %.1f%% H', ...
+                  sagDepth_corner_px, sagDepth_corner_mm, sagPct_H_corner, ...
+                  sagDepth_bb_px, sagDepth_bb_mm, sagPct_H_bb), 'FontSize', 10);
+    axis tight; hold off;
+    
+    %% Panel 2: Profile plot with both baselines
     subplot(1, 2, 2);
     xCoords = 1:length(topSmooth);
     
-    % Top edge (blue)
     plot(xCoords, topSmooth, 'b-', 'LineWidth', 2); hold on;
+    plot(xCoords, baselineCorner, 'g-', 'LineWidth', 2);
+    plot(xCoords, baselineBB, 'c-', 'LineWidth', 2);
+    if parabolaFitValid, plot(xCoords, topFitted, 'r:', 'LineWidth', 2); end
     
-    % Baseline (green)
-    plot(xCoords, baselineIdeal, 'g-', 'LineWidth', 2);
+    % Bottom edge
+    plot(leftCornerIdx:rightCornerIdx, bottomSmooth(leftCornerIdx:rightCornerIdx), 'm-', 'LineWidth', 1.5);
+    plot([leftCornerIdx rightCornerIdx], [bottomFloor_Y bottomFloor_Y], 'm--', 'LineWidth', 2);
     
-    % Parabola fit (red dotted)
-    if parabolaFitValid
-        plot(xCoords, topFitted, 'r:', 'LineWidth', 2);
-    end
-    
-    % Bottom edge ONLY between corners (cyan)
-    plot(leftCornerIdx:rightCornerIdx, bottomSmooth(leftCornerIdx:rightCornerIdx), 'c-', 'LineWidth', 1.5);
-    
-    % Bottom floor line (cyan dashed)
-    plot([leftCornerIdx rightCornerIdx], [bottomFloor_Y bottomFloor_Y], 'c--', 'LineWidth', 2);
-    
-    % Corners (green)
+    % Corners
     plot(leftCornerIdx, leftCornerY, 'go', 'MarkerSize', 10, 'LineWidth', 3, 'MarkerFaceColor', 'g');
     plot(rightCornerIdx, rightCornerY, 'go', 'MarkerSize', 10, 'LineWidth', 3, 'MarkerFaceColor', 'g');
     
-    % Vertex (red triangle)
+    % Vertex
     if parabolaFitValid && ~isnan(yVertex)
         plot(xVertexIdx, yVertex, 'r^', 'MarkerSize', 10, 'LineWidth', 2, 'MarkerFaceColor', 'r');
-        % Sag depth line (magenta)
-        plot([xVertexIdx xVertexIdx], [idealTop_Y yVertex], 'm-', 'LineWidth', 3);
+        plot([xVertexIdx xVertexIdx], [idealTop_Y_corner yVertex], 'g-', 'LineWidth', 3);
+        plot([xVertexIdx+2 xVertexIdx+2], [idealTop_Y_bb yVertex], 'c-', 'LineWidth', 3);
     end
     
-    % Lumen height indicator (black)
+    % Height reference line
     midIdx = round((leftCornerIdx + rightCornerIdx) / 2);
-    plot([midIdx midIdx], [idealTop_Y bottomFloor_Y], 'k-', 'LineWidth', 2);
+    plot([midIdx midIdx], [idealTop_Y_bb bottomFloor_Y], 'k-', 'LineWidth', 2);
     
-    % Sag area fill
+    % Fill areas
     xFillPlot = leftCornerIdx:rightCornerIdx;
-    fill([xFillPlot fliplr(xFillPlot)], [topSmooth(xFillPlot) fliplr(baselineIdeal(xFillPlot))], ...
-         'r', 'FaceAlpha', 0.2, 'EdgeColor', 'none');
+    fill([xFillPlot fliplr(xFillPlot)], [topSmooth(xFillPlot) fliplr(baselineCorner(xFillPlot))], ...
+         'g', 'FaceAlpha', 0.15, 'EdgeColor', 'none');
+    fill([xFillPlot fliplr(xFillPlot)], [baselineCorner(xFillPlot) fliplr(baselineBB(xFillPlot))], ...
+         'c', 'FaceAlpha', 0.15, 'EdgeColor', 'none');
     
     set(gca, 'YDir', 'reverse');
-    xlabel('Position (px)');
-    ylabel('Y (px)');
-    grid on;
-    
-    % Simplified legend
-    legend({'Top edge', 'Ideal baseline', sprintf('Parabola (R²=%.3f)', R2), ...
-            'Bottom (between corners)', 'Bottom floor', 'Corners', '', ...
-            'Sag vertex', sprintf('Sag=%.1fpx', sagDepth_px)}, ...
-           'Location', 'southeast', 'FontSize', 8);
-    
-    title(sprintf('Profile (R² = %.3f)', R2), 'FontSize', 10);
+    xlabel('Position (px)'); ylabel('Y (px)'); grid on;
+    legend({'Top edge', 'Baseline (Corner)', 'Baseline (BB)', sprintf('Parabola (R^2=%.3f)', R2), ...
+            'Bottom (between)', 'Bottom floor', 'Corners', '', ...
+            'Vertex', sprintf('Sag Corner=%.1fpx', sagDepth_corner_px), ...
+            sprintf('Sag BB=%.1fpx', sagDepth_bb_px)}, ...
+           'Location', 'southeast', 'FontSize', 7);
+    title(sprintf('Profile (R^2 = %.3f)', R2), 'FontSize', 10);
     hold off;
     
-    % ===== MAIN TITLE =====
-    sgtitle(sprintf(['SAG ANALYSIS\n' ...
-        'Sag: %.1f px = %.3f mm | %.1f%% of H_{meas} | %.1f%% of H_{theo} | %.1f%% of width span\n' ...
-        'Height: meas_bb=%.0fpx, theo=%.0fpx (%.1f%%) | Width: meas_bb=%.0fpx, theo=%.0fpx (%.1f%%)'], ...
-        sagDepth_px, sagDepth_mm, sagPct_H, sagPct_Htheo, sagPct_span, ...
-        measHeight_px, theoHeight_px, heightPct, ...
-        measWidth_px, theoWidth_px, widthPct), ...
+    sgtitle(sprintf(['SAG ANALYSIS (Two Baselines)\n' ...
+        'Corner-based: %.1f px = %.3f mm | %.1f%% of H_{meas} | %.1f%% of H_{theo}\n' ...
+        'BB-based: %.1f px = %.3f mm | %.1f%% of H_{meas}\n' ...
+        'Baseline Diff: %.1f px | Height: %.0fpx (%.1f%%) | Width: %.0fpx (%.1f%%)'], ...
+        sagDepth_corner_px, sagDepth_corner_mm, sagPct_H_corner, sagPct_Htheo_corner, ...
+        sagDepth_bb_px, sagDepth_bb_mm, sagPct_H_bb, ...
+        idealTop_Y_corner - idealTop_Y_bb, ...
+        measHeight_px, heightPct, measWidth_px, widthPct), ...
         'FontSize', 10, 'FontWeight', 'bold');
 end

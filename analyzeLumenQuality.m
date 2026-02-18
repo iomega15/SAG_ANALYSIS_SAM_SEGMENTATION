@@ -42,13 +42,13 @@ function qualityMetrics = analyzeLumenQuality(BWlumen, sagMetrics, I, mmPerPx)
     qualityMetrics.brightnessStd = std(lumenPixels);
     
     % Classify status based on brightness
-    if qualityMetrics.brightness > 0.5
-        qualityMetrics.status = 'bright';  % Clean, open lumen
-    elseif qualityMetrics.brightness > 0.25
-        qualityMetrics.status = 'partial'; % Partially occluded
-    else
-        qualityMetrics.status = 'dark';    % Occluded/clogged
-    end
+    % if qualityMetrics.brightness > 0.5
+    %     qualityMetrics.status = 'bright';  % Clean, open lumen
+    % elseif qualityMetrics.brightness > 0.25
+    %     qualityMetrics.status = 'partial'; % Partially occluded
+    % else
+    %     qualityMetrics.status = 'dark';    % Occluded/clogged
+    % end
     
     %% 2. CONVEX HULL AND SOLIDITY
     BW_hull = bwconvhull(BWlumen);
