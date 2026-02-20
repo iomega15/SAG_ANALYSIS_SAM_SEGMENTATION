@@ -1,6 +1,5 @@
 # sam_segment_all.py
-# Gets the CENTER-BASED lumen mask (original working approach)
-# PLUS all other masks from point grid for texture analysis
+# Gets CENTER-BASED lumen mask PLUS all other masks for texture analysis
 import cv2
 import numpy as np
 import torch
@@ -19,7 +18,7 @@ predictor = SamPredictor(sam)
 predictor.set_image(image_rgb)
 
 # ============================================
-# STEP 1: Get LUMEN mask using CENTER point (original working approach)
+# STEP 1: Get LUMEN mask using CENTER point
 # ============================================
 cx = int(target_x)
 cy = int(target_y)
@@ -37,23 +36,24 @@ lumen_mask = masks[0].astype(np.uint8)
 lumen_confidence = float(scores[0])
 
 # ============================================
-# STEP 2: Get ALL OTHER masks using a grid of points
+# STEP 2: Get ALL OTHER masks using point grid
 # ============================================
 all_masks_list = []
 all_scores_list = []
 
-# Grid of points across the image
+# Grid of points
 points_per_side = 6
 x_coords = np.linspace(w * 0.1, w * 0.9, points_per_side)
 y_coords = np.linspace(h * 0.1, h * 0.9, points_per_side)
 
 for y in y_coords:
     for x in x_coords:
-        # Skip if this point is inside the lumen mask
-        py, px = int(y), int(x)
+        px, py = int(x), int(y)
+        
+        # Skip if inside lumen mask
         if lumen_mask[py, px] > 0:
             continue
-            
+        
         point = np.array([[px, py]])
         label = np.array([1])
         
@@ -63,13 +63,12 @@ for y in y_coords:
             multimask_output=True,
         )
         
-        # Take the best mask for this point
         best_idx = np.argmax(point_scores)
         all_masks_list.append(point_masks[best_idx])
         all_scores_list.append(point_scores[best_idx])
 
 # ============================================
-# STEP 3: Remove duplicate masks
+# STEP 3: Remove duplicates
 # ============================================
 unique_masks = []
 unique_scores = []
@@ -77,20 +76,18 @@ unique_scores = []
 for i, mask in enumerate(all_masks_list):
     is_duplicate = False
     
-    # Check against lumen mask
+    # Check against lumen
     intersection = np.logical_and(mask, lumen_mask).sum()
     union = np.logical_or(mask, lumen_mask).sum()
-    iou_with_lumen = intersection / (union + 1e-6)
-    if iou_with_lumen > 0.5:
+    if union > 0 and intersection / union > 0.5:
         is_duplicate = True
     
-    # Check against other unique masks
+    # Check against existing unique masks
     if not is_duplicate:
-        for existing_mask in unique_masks:
-            intersection = np.logical_and(mask, existing_mask).sum()
-            union = np.logical_or(mask, existing_mask).sum()
-            iou = intersection / (union + 1e-6)
-            if iou > 0.7:
+        for existing in unique_masks:
+            intersection = np.logical_and(mask, existing).sum()
+            union = np.logical_or(mask, existing).sum()
+            if union > 0 and intersection / union > 0.7:
                 is_duplicate = True
                 break
     
@@ -99,9 +96,8 @@ for i, mask in enumerate(all_masks_list):
         unique_scores.append(all_scores_list[i])
 
 # ============================================
-# STEP 4: Combine: Lumen mask FIRST, then all others
+# STEP 4: Combine all masks (lumen first)
 # ============================================
-# Lumen is always index 0
 all_masks_combined = [lumen_mask]
 for m in unique_masks:
     all_masks_combined.append(m.astype(np.uint8))
@@ -110,13 +106,9 @@ num_masks = len(all_masks_combined)
 all_masks_out = np.stack(all_masks_combined, axis=0)
 
 # ============================================
-# STEP 5: Export results
+# STEP 5: Export
 # ============================================
-# Original outputs (for backward compatibility)
 lumen_mask_out = lumen_mask
 confidence_score = lumen_confidence
-
-# New outputs (all masks for texture analysis)
 all_masks_out = all_masks_out
 num_masks = int(num_masks)
-lumen_index = 0  # Lumen is always the first mask
