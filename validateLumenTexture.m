@@ -9,7 +9,7 @@ if isempty(selected_mask_idx)
     return;
 end
 
-lumen_density  = textureFeatures(selected_mask_idx);
+lumen_density = textureFeatures.combinedDensity(selected_mask_idx);
 anchor_density = anchor_texture;  % area-weighted mean of all anchor masks
 
 quality.lumen_density  = lumen_density;

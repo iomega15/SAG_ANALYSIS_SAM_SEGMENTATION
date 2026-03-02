@@ -28,18 +28,38 @@ minWidthPx     = 50;
 debugPlots     = false;       % For scale bar visualization
 saveSagDebug   = true;        % Save sag analysis debug images
 
+resumeRun = true;    % true = keep existing debug/results, false = clean start
+
+%% CREATE BACKUP FOLDER
+backupDir = fullfile(rootDir, 'backup');
+if resumeRun && exist(backupDir, 'dir')
+    existing = numel(dir(fullfile(backupDir, '*.mat')));
+    fprintf('RESUME: Backup folder preserved (%d files): %s\n', existing, backupDir);
+else
+    make_clean_folder(backupDir);
+    fprintf('Backup folder cleaned: %s\n', backupDir);
+end
+
 %% CREATE DEBUG FOLDER
 debugFolder = fullfile(rootDir, 'debug_sag_analysis');
 if saveSagDebug
-    make_clean_folder(debugFolder);
-    fprintf('Debug folder created: %s\n', debugFolder);
+    if resumeRun && exist(debugFolder, 'dir')
+        existing = numel(dir(fullfile(debugFolder, '*.png')));
+        fprintf('RESUME: Debug folder preserved (%d images): %s\n', existing, debugFolder);
+    else
+        make_clean_folder(debugFolder);
+        fprintf('Debug folder cleaned: %s\n', debugFolder);
+    end
 end
 
 %% CREATE RESULTS FOLDER
 resultsFolder = fullfile(rootDir, 'results');
-make_clean_folder(resultsFolder);
-fprintf('Clean results folder created: %s\n', resultsFolder);
-
+if resumeRun && exist(resultsFolder, 'dir')
+    fprintf('RESUME: Results folder preserved: %s\n', resultsFolder);
+else
+    make_clean_folder(resultsFolder);
+    fprintf('Results folder cleaned: %s\n', resultsFolder);
+end
 %% FIND IMAGES
 % Additional directories to include
 %additionalDirs = {
@@ -311,56 +331,48 @@ fprintf('=== Removed %d superseded experiments, %d remaining ===\n\n', nRemoved,
 
 %% PASS 1: FILL OCR + MEASUREMENTS + SAG ANALYSIS (SLOW)
 tic
-for i = 19:height(T)
+for i = 1:height(T)
+    % Declare cleanup variables so they always exist
+    %I            = [];
+    %I_rotated    = [];
+    %BWlumen      = [];
+    %BWlumen_rotated = [];
+    %figSAM       = [];
+    %figSag       = [];
+    %figQuality   = [];
+
     try
         fpath = fullfile(T.Folder{i}, T.File{i});
         I = imread(fpath);
         fprintf('[%d/%d] %s\n', i, height(T), T.File{i});
 
-        % OCR (full image)
+        % --- OCR block ---
         ocrOut = extractLensAndScaleTextOCR(I, roi, false);
-
-        % Parse OCR text
-        [T.Lens_OCR(i), T.TiltDeg_OCR(i)] = parseLensTiltFromOCR(ocrOut.rawText);
+        [T.Lens_OCR(i), T.TiltDeg_OCR(i)]     = parseLensTiltFromOCR(ocrOut.rawText);
         [T.ScaleValue_OCR(i), T.ScaleUnits_OCR{i}] = parseScaleFromOCRText(ocrOut.rawText);
-
-        % Scale bar pixels
-        T.BarPx(i) = measureScaleBarPixels(I, roi, thrWhite, minAreaPx, minAspectRatio, minWidthPx, debugPlots);
-
-        % mm/px
+        T.BarPx(i) = measureScaleBarPixels(I, roi, thrWhite, minAreaPx, ...
+                         minAspectRatio, minWidthPx, debugPlots);
         if ~isnan(T.ScaleValue_OCR(i)) && T.BarPx(i) > 0
             T.mmPerPx(i) = T.ScaleValue_OCR(i) / T.BarPx(i);
         end
+        clear ocrOut  % free immediately
 
-        % ============================================================
-        % SAM SEGMENTATION
-        % ============================================================
+        % --- Backup / cache check ---
         [~, baseName, ~] = fileparts(T.File{i});
-
-        % Backup folder for caching SAM results
-        backupDir = fullfile(T.Folder{i}, 'backup');
-        if ~exist(backupDir, 'dir')
-            mkdir(backupDir);
-        end
         backupFile = fullfile(backupDir, [baseName '_full_results.mat']);
-
-        forceSAM = false;
+        forceSAM   = false;
 
         if exist(backupFile, 'file') && ~forceSAM
-            loadedData = load(backupFile, 'BWlumen', 'samQuality');
-            BWlumen    = loadedData.BWlumen;
-            samQuality = loadedData.samQuality;
-        else
-            [BWlumen, samQuality] = segmentLumenSAM2(I, roi, debugFolder, baseName);
-
-            try
-                save(backupFile, 'BWlumen', 'samQuality');
-            catch
-                warning('Could not save SAM backup file to %s', backupFile);
-            end
+            loadedData = load(backupFile, 'rowTable');  % only load what's needed
+            T(i,:) = loadedData.rowTable;
+            clear loadedData I
+            fprintf('  [CACHED]\n');
+            continue;
         end
 
-        % Store SAM quality fields (always — whether fresh or cached)
+        % --- SAM segmentation ---
+        [BWlumen, samQuality] = segmentLumenSAM2(I, roi, debugFolder, baseName);
+
         T.SAM_Confidence(i)      = samQuality.confidence;
         T.SAM_NumMasks(i)        = samQuality.num_masks;
         T.SAM_LumenValid(i)      = samQuality.lumen_valid;
@@ -373,108 +385,92 @@ for i = 19:height(T)
         T.SAM_LumenAreaPx(i)     = samQuality.lumen_area_px;
         T.SAM_AnchorAreaPx(i)    = samQuality.anchor_area_px;
 
-        % ============================================================
-        % ROTATION: Apply AFTER SAM, BEFORE sag analysis
-        % ============================================================
+        % --- Rotation ---
         [I_rotated, BWlumen_rotated, rotationAngle] = ...
             autoRotateImage(I, BWlumen, roi, saveSagDebug, debugFolder, baseName);
-
         T.RotationAngle_deg(i) = rotationAngle;
+        clear I BWlumen  % originals no longer needed
+
         if abs(rotationAngle) > 0.05
-            fprintf('  Auto-rotated by %.2f degrees\n', rotationAngle);
+            fprintf('  Auto-rotated by %.2f deg\n', rotationAngle);
         end
 
-        % ============================================================
-        % Debug: SAM result on rotated image
-        % ============================================================
+        % --- SAM debug figure ---
         if saveSagDebug
-            figSAM = figure('Visible', 'off', 'Position', [100 100 1400 500]);
-            subplot(1,3,1); imshow(I_rotated); title('Image (Rotated)');
+            figSAM = figure('Visible','off','Position',[100 100 1400 500]);
+            subplot(1,3,1); imshow(I_rotated);       title('Image (Rotated)');
             subplot(1,3,2); imshow(BWlumen_rotated); title('SAM Mask (Rotated)');
             subplot(1,3,3); imshow(I_rotated); hold on;
             if any(BWlumen_rotated(:))
-                visboundaries(BWlumen_rotated, 'Color', 'r');
+                visboundaries(BWlumen_rotated,'Color','r');
             end
             hold off; title('Overlay');
-            sgtitle(sprintf('%s — SAM Result', baseName), 'Interpreter', 'none');
-            saveas(figSAM, fullfile(debugFolder, [baseName '_SAM_debug.png']));
-            close(figSAM);
+            sgtitle(sprintf('%s — SAM Result', baseName),'Interpreter','none');
+            saveas(figSAM, fullfile(debugFolder,[baseName '_SAM_debug.png']));
+            close(figSAM); figSAM = [];
         end
 
-        % ============================================================
-        % LUMEN METRICS + SAG ANALYSIS (on rotated image/mask)
-        % ============================================================
+        % --- Lumen metrics + sag ---
         lumenFound = any(BWlumen_rotated(:)) && samQuality.lumen_valid;
         sagValid   = false;
 
         if lumenFound
-            rp = regionprops(BWlumen_rotated, 'Area', 'BoundingBox');
+            rp = regionprops(BWlumen_rotated,'Area','BoundingBox');
             [~, k] = max([rp.Area]);
             bb = rp(k).BoundingBox;
-            T.LumenArea_px(i)   = rp(k).Area;
+            clear rp  % free struct array
+
+            T.LumenArea_px(i)   = bb(4)*bb(3);  % or rp(k).Area
             T.LumenWidth_px(i)  = bb(3);
             T.LumenHeight_px(i) = bb(4);
 
             sagMetrics = measureMembraneSag(BWlumen_rotated, T.mmPerPx(i), false, ...
                 T.H_layers(i), T.Width_px(i), layerHeight_mm, pixelWidth_mm);
-
             sagValid = sagMetrics.valid;
 
             if sagValid
-                % --- Sag measurements ---
-                T.SagDepth_px(i)                   = sagMetrics.sagDepth_px;
-                T.SagDepth_mm(i)                   = sagMetrics.sagDepth_mm;
-                T.SagPct_ofMeasuredHeight(i)       = sagMetrics.sagPct_ofMeasuredHeight;
-                T.SagPct_ofTheoreticalHeight(i)    = sagMetrics.sagPct_ofTheoreticalHeight;
-                T.SagPct_ofWidthSpan(i)            = sagMetrics.sagPct_ofWidthSpan;
-                T.ParabolaR2(i)                    = sagMetrics.parabolaR2;
-                T.SagArea_px2(i)                   = sagMetrics.sagArea_px2;
+                % --- Sag metrics (same as before) ---
+                T.SagDepth_px(i)                    = sagMetrics.sagDepth_px;
+                T.SagDepth_mm(i)                    = sagMetrics.sagDepth_mm;
+                T.SagPct_ofMeasuredHeight(i)        = sagMetrics.sagPct_ofMeasuredHeight;
+                T.SagPct_ofTheoreticalHeight(i)     = sagMetrics.sagPct_ofTheoreticalHeight;
+                T.SagPct_ofWidthSpan(i)             = sagMetrics.sagPct_ofWidthSpan;
+                T.ParabolaR2(i)                     = sagMetrics.parabolaR2;
+                T.SagArea_px2(i)                    = sagMetrics.sagArea_px2;
+                T.IsVertexBetween(i)                = sagMetrics.isVertexBetween;
+                T.IsVertexLowerLeft(i)              = sagMetrics.isVertexLowerLeft;
+                T.IsVertexLowerRight(i)             = sagMetrics.isVertexLowerRight;
+                T.MeasuredHeight_px(i)              = sagMetrics.measuredHeight_px;
+                T.MeasuredHeight_mm(i)              = sagMetrics.measuredHeight_mm;
+                T.TheoreticalHeight_px(i)           = sagMetrics.theoreticalHeight_px;
+                T.TheoreticalHeight_mm(i)           = sagMetrics.theoreticalHeight_mm;
+                T.HeightPct_ofTheoretical(i)        = sagMetrics.heightPct_ofTheoretical;
+                T.MeasuredWidth_px(i)               = sagMetrics.measuredWidth_px;
+                T.MeasuredWidth_mm(i)               = sagMetrics.measuredWidth_mm;
+                T.TheoreticalWidth_px(i)            = sagMetrics.theoreticalWidth_px;
+                T.TheoreticalWidth_mm(i)            = sagMetrics.theoreticalWidth_mm;
+                T.WidthPct_ofTheoretical(i)         = sagMetrics.widthPct_ofTheoretical;
+                T.LeftWallTiltAngle_deg(i)          = sagMetrics.leftWallTiltAngle_deg;
+                T.RightWallTiltAngle_deg(i)         = sagMetrics.rightWallTiltAngle_deg;
+                T.AvgWallTiltAngle_deg(i)           = sagMetrics.avgWallTiltAngle_deg;
+                T.TotalWallInward_mm(i)             = sagMetrics.totalWallInward_mm;
+                T.ActualArea_mm2(i)                 = sagMetrics.actualArea_mm2;
+                T.TheoreticalArea_mm2(i)            = sagMetrics.theoreticalArea_mm2;
+                T.AreaPct_ofTheoretical(i)          = sagMetrics.areaPct_ofTheoretical;
+                T.ConvexityRatio(i)                 = sagMetrics.convexityRatio;
+                T.SagDepthBB_px(i)                  = sagMetrics.sagDepthBB_px;
+                T.SagDepthBB_mm(i)                  = sagMetrics.sagDepthBB_mm;
+                T.SagAreaBB_px2(i)                  = sagMetrics.sagAreaBB_px2;
+                T.SagAreaBB_mm2(i)                  = sagMetrics.sagAreaBB_mm2;
+                T.SagBB_Pct_ofMeasuredHeight(i)     = sagMetrics.sagBB_Pct_ofMeasuredHeight;
+                T.SagBB_Pct_ofTheoreticalHeight(i)  = sagMetrics.sagBB_Pct_ofTheoreticalHeight;
+                T.SagBB_Pct_ofWidthSpan(i)          = sagMetrics.sagBB_Pct_ofWidthSpan;
+                T.BaselineDiff_px(i)                = sagMetrics.baselineDiff_px;
+                T.BaselineDiff_mm(i)                = sagMetrics.baselineDiff_mm;
 
-                % --- Validation flags ---
-                T.IsVertexBetween(i)               = sagMetrics.isVertexBetween;
-                T.IsVertexLowerLeft(i)             = sagMetrics.isVertexLowerLeft;
-                T.IsVertexLowerRight(i)            = sagMetrics.isVertexLowerRight;
-
-                % --- Height ---
-                T.MeasuredHeight_px(i)             = sagMetrics.measuredHeight_px;
-                T.MeasuredHeight_mm(i)             = sagMetrics.measuredHeight_mm;
-                T.TheoreticalHeight_px(i)          = sagMetrics.theoreticalHeight_px;
-                T.TheoreticalHeight_mm(i)          = sagMetrics.theoreticalHeight_mm;
-                T.HeightPct_ofTheoretical(i)       = sagMetrics.heightPct_ofTheoretical;
-
-                % --- Width ---
-                T.MeasuredWidth_px(i)              = sagMetrics.measuredWidth_px;
-                T.MeasuredWidth_mm(i)              = sagMetrics.measuredWidth_mm;
-                T.TheoreticalWidth_px(i)           = sagMetrics.theoreticalWidth_px;
-                T.TheoreticalWidth_mm(i)           = sagMetrics.theoreticalWidth_mm;
-                T.WidthPct_ofTheoretical(i)        = sagMetrics.widthPct_ofTheoretical;
-
-                % --- Wall tilt ---
-                T.LeftWallTiltAngle_deg(i)         = sagMetrics.leftWallTiltAngle_deg;
-                T.RightWallTiltAngle_deg(i)        = sagMetrics.rightWallTiltAngle_deg;
-                T.AvgWallTiltAngle_deg(i)          = sagMetrics.avgWallTiltAngle_deg;
-                T.TotalWallInward_mm(i)            = sagMetrics.totalWallInward_mm;
-
-                % --- Area ---
-                T.ActualArea_mm2(i)                = sagMetrics.actualArea_mm2;
-                T.TheoreticalArea_mm2(i)           = sagMetrics.theoreticalArea_mm2;
-                T.AreaPct_ofTheoretical(i)         = sagMetrics.areaPct_ofTheoretical;
-                T.ConvexityRatio(i)                = sagMetrics.convexityRatio;
-
-                % --- BoundingBox sag ---
-                T.SagDepthBB_px(i)                 = sagMetrics.sagDepthBB_px;
-                T.SagDepthBB_mm(i)                 = sagMetrics.sagDepthBB_mm;
-                T.SagAreaBB_px2(i)                 = sagMetrics.sagAreaBB_px2;
-                T.SagAreaBB_mm2(i)                 = sagMetrics.sagAreaBB_mm2;
-                T.SagBB_Pct_ofMeasuredHeight(i)    = sagMetrics.sagBB_Pct_ofMeasuredHeight;
-                T.SagBB_Pct_ofTheoreticalHeight(i) = sagMetrics.sagBB_Pct_ofTheoreticalHeight;
-                T.SagBB_Pct_ofWidthSpan(i)         = sagMetrics.sagBB_Pct_ofWidthSpan;
-                T.BaselineDiff_px(i)               = sagMetrics.baselineDiff_px;
-                T.BaselineDiff_mm(i)               = sagMetrics.baselineDiff_mm;
-
-                % --- Lumen quality ---
-                qualityMetrics = analyzeLumenQuality(BWlumen_rotated, sagMetrics, I_rotated, T.mmPerPx(i));
-
+                % --- Quality metrics ---
+                qualityMetrics = analyzeLumenQuality(BWlumen_rotated, sagMetrics, ...
+                                                     I_rotated, T.mmPerPx(i));
                 if qualityMetrics.valid
                     T.LumenBrightness(i)    = qualityMetrics.brightness;
                     T.LumenBrightnessStd(i) = qualityMetrics.brightnessStd;
@@ -487,21 +483,23 @@ for i = 19:height(T)
                 % --- Debug figures ---
                 if saveSagDebug
                     figSag = measureMembraneSag_debugFigure(BWlumen_rotated, sagMetrics, T.File{i});
-                    saveas(figSag, fullfile(debugFolder, [baseName '_sag_debug.png']));
-                    close(figSag);
+                    saveas(figSag, fullfile(debugFolder,[baseName '_sag_debug.png']));
+                    close(figSag); figSag = [];
 
                     if qualityMetrics.valid
-                        figQuality = plotLumenQualityDebug(I_rotated, BWlumen_rotated, qualityMetrics, T.File{i});
-                        saveas(figQuality, fullfile(debugFolder, [baseName '_quality_debug.png']));
-                        close(figQuality);
+                        figQuality = plotLumenQualityDebug(I_rotated, BWlumen_rotated, ...
+                                                           qualityMetrics, T.File{i});
+                        saveas(figQuality, fullfile(debugFolder, ...
+                               [baseName '_quality_debug.png']));
+                        close(figQuality); figQuality = [];
                     end
                 end
+                clear qualityMetrics
             end
+            clear sagMetrics
         end
 
-        % ============================================================
-        % STATUS — set once, at the end
-        % ============================================================
+        % --- Status ---
         if ~lumenFound
             T.LumenStatus{i} = 'no_lumen_detected';
             T.Notes{i}       = 'SAM: no lumen';
@@ -513,7 +511,7 @@ for i = 19:height(T)
             T.Notes{i}       = 'OK';
         end
 
-        % Consolidated lens/tilt columns
+        % --- Consolidated lens/tilt ---
         T.Lens(i) = T.Lens_Name(i);
         if isnan(T.Lens(i)) && ~isnan(T.Lens_OCR(i))
             T.Lens(i) = T.Lens_OCR(i);
@@ -523,13 +521,39 @@ for i = 19:height(T)
             T.TiltDeg(i) = T.TiltDeg_OCR(i);
         end
 
+        % --- Save backup ---
+        rowTable = T(i,:);
+        save(backupFile, 'BWlumen_rotated', 'samQuality', 'rowTable');
+
     catch ME
         T.Notes{i} = ['FAIL: ' ME.message];
-        fprintf('  ERROR: %s\n', ME.message);
-        close all
+        fprintf('  ERROR on %s: %s\n', T.File{i}, ME.message);
     end
+
+    % ================================================================
+    % GUARANTEED CLEANUP — runs even if try/catch triggered
+    % ================================================================
+    %clear I I_rotated BWlumen BWlumen_rotated rowTable samQuality sagMetrics
+    % Close any leaked figures
+ 
+        close all hidden
+    clear I I_rotated BWlumen BWlumen_rotated
+
+    % Periodic memory report + autosave (every 10 images)
+    if mod(i, 10) == 0
+        m = memory;
+        fprintf('  [mem] %.1f GB in use\n', m.MemUsedMATLAB / 1e9);
+
+        try
+            writetable(T, fullfile(rootDir, 'image_results_INPROGRESS.csv'));
+        catch ME_save
+            fprintf('  [autosave FAILED] %s\n', ME_save.message);
+        end
+    end
+
 end
 toc
+
 %% CLASSIFY LUMEN FORMATION (post-hoc clustering)
 T = classifyLumenFormation(T);
 

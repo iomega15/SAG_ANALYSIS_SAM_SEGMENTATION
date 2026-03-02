@@ -1,5 +1,5 @@
-function [lumen_candidates, candidate_polarity, candidate_scores, selected_mask_idx, selected_polarity] = ...
-    selectCentralLumenCandidate(allMasksExclusive, lumen_candidates, candidate_polarity, candidate_scores, Hc, Wc)
+function [lumen_candidates, candidate_imfill_polarity, candidate_imfill_scores, selected_mask_idx, selected_polarity] = ...
+    selectCentralLumenCandidate(allMasksExclusive, lumen_candidates, candidate_imfill_polarity, candidate_imfill_scores, Hc, Wc)
 
 selected_mask_idx = [];
 selected_polarity = 'unknown';
@@ -29,10 +29,10 @@ end
 
 if ~isempty(best_i)
     selected_mask_idx = lumen_candidates(best_i);
-    selected_polarity = candidate_polarity{best_i};
+    selected_polarity = candidate_imfill_polarity{best_i};
     % Reduce candidate list to just the winner
     lumen_candidates   = lumen_candidates(best_i);
-    candidate_polarity = candidate_polarity(best_i);
-    candidate_scores   = candidate_scores(best_i);
+    candidate_imfill_polarity = candidate_imfill_polarity(best_i);
+    candidate_imfill_scores   = candidate_imfill_scores(best_i);
 end
 end

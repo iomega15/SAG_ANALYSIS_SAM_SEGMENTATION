@@ -1,9 +1,9 @@
 function saveStep4_8Debug(I_cropped, allMasksExclusive, ...
-    selected_mask_idx, anchor_mask_indices, anchor_mask, ...
+    selected_mask_idx, anchor_mask, ...
     texture_contrast, lumen_density, anchor_density, lumen_valid, ...
     debugFolder, baseName, CONTRAST_THRESHOLD, showFigures)
 
-[Hc, Wc, ~] = size(I_cropped);
+%[Hc, Wc, ~] = size(I_cropped);
 Igray_overlay = im2double(rgb2gray(I_cropped));
 base_rgb      = repmat(Igray_overlay * 0.4, [1 1 3]);
 
@@ -33,7 +33,8 @@ if ~isempty(selected_mask_idx)
 end
 imshow(overlay); hold on;
 
-anchor_label = sprintf('Anchor (masks %s)', num2str(anchor_mask_indices));
+anchor_label = 'Anchor (portion)';
+%anchor_label = sprintf('Anchor (masks %s)', num2str(anchor_mask_indices));
 h_anchor = patch(NaN, NaN, [0.9, 0.2, 0.2], 'EdgeColor', 'none', 'DisplayName', anchor_label);
 if ~isempty(selected_mask_idx)
     h_cand = patch(NaN, NaN, [0.2, 1.0, 0.2], 'EdgeColor', 'none', ...

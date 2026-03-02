@@ -1,9 +1,9 @@
-function [textureFeatures, maskAreas] = computeAllMaskTextures(Igray, allMasksExclusive, numMasks)
+function textureFeatures = computeAllMaskTextures(Igray, allMasksExclusive, numMasks, maskAreas)
 %COMPUTEALLMASKTEXTURES  Interior-only texture scores using percentage-based
 % peripheral trimming per row and column.
 %
 % For each mask:
-%   1. Per row: find leftmost and rightmost mask pixel, discard outer 25% 
+%   1. Per row: find leftmost and rightmost mask pixel, discard outer 25%
 %      on each side, keep central 50%
 %   2. Per column: same vertically
 %   3. Interior = intersection of horizontal AND vertical central bands
@@ -14,9 +14,8 @@ function [textureFeatures, maskAreas] = computeAllMaskTextures(Igray, allMasksEx
 %       .cannyDensity    - [numMasks x 1] Canny edge density per interior
 %       .stdDensity      - [numMasks x 1] Local-std edge density per interior
 %       .combinedDensity - [numMasks x 1] combined (OR) edge density per interior
-%   maskAreas       - [numMasks x 1] total mask pixel count
 
-TRIM_FRAC = 0.25;  % discard this fraction from each side
+TRIM_FRAC = 0.25;
 
 % --- Compute filters once ---
 canny_BW     = edge(Igray, 'Canny', [0.01 0.1]);
@@ -29,15 +28,13 @@ combined_BW  = canny_BW | local_std_BW;
 cannyDensity    = zeros(numMasks, 1);
 stdDensity      = zeros(numMasks, 1);
 combinedDensity = zeros(numMasks, 1);
-maskAreas       = zeros(numMasks, 1);
 
 for m = 1:numMasks
-    thisMask     = squeeze(allMasksExclusive(m, :, :));
-    maskAreas(m) = sum(thisMask(:));
-
     if maskAreas(m) < 100
         continue;
     end
+
+    thisMask = squeeze(allMasksExclusive(m, :, :));
 
     % --- Horizontal trimming: per row ---
     interior_h = false(Hc, Wc);
@@ -68,17 +65,16 @@ for m = 1:numMasks
     end
 
     % --- Interior = must pass BOTH trims AND be within mask ---
-    interior = thisMask & interior_h & interior_v;
+    interior      = thisMask & interior_h & interior_v;
     interior_area = sum(interior(:));
-
     if interior_area < 50
         continue;
     end
 
     % --- Separate and combined scores ---
-    cannyDensity(m)    = sum(canny_BW(interior))    / interior_area;
-    stdDensity(m)      = sum(local_std_BW(interior)) / interior_area;
-    combinedDensity(m) = sum(combined_BW(interior))  / interior_area;
+    cannyDensity(m)    = sum(canny_BW(interior))     / interior_area;
+    stdDensity(m)      = sum(local_std_BW(interior))  / interior_area;
+    combinedDensity(m) = sum(combined_BW(interior))   / interior_area;
 end
 
 % --- Pack into struct ---
