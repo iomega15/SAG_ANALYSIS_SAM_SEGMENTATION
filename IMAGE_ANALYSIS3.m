@@ -43,7 +43,7 @@ fprintf('Clean results folder created: %s\n', resultsFolder);
 %% FIND IMAGES
 % Additional directories to include
 %additionalDirs = {
- %   'C:\Users\...' 
+%   'C:\Users\...'
 %};
 allDirs = [{rootDir}]; %; additionalDirs(:)];
 
@@ -69,7 +69,7 @@ Folder       = cell(N,1);
 File         = cell(N,1);
 
 % --- NEW COLUMN FOR DATASET TYPE ---
-Condition    = cell(N,1); 
+Condition    = cell(N,1);
 
 Lens_Name    = nan(N,1);
 TiltDeg_Name = nan(N,1);
@@ -100,8 +100,8 @@ SagPct_ofWidthSpan          = nan(N,1);
 ParabolaR2                  = nan(N,1);
 
 % ===== SAG ANALYSIS METRICS =====
-SagArea_px2             = nan(N,1); % 
-SagArea_mm2             = nan(N,1); % 
+SagArea_px2             = nan(N,1); %
+SagArea_mm2             = nan(N,1); %
 
 % ===== SAG VALIDATION FLAGS =====
 IsVertexBetween         = false(N,1);
@@ -150,33 +150,54 @@ SagBB_Pct_ofWidthSpan       = nan(N,1);
 BaselineDiff_px             = nan(N,1);
 BaselineDiff_mm             = nan(N,1);
 
+% Add columns to table initialization (Pass 0):
+SAM_Confidence      = nan(N,1);
+SAM_TextureContrast = nan(N,1);
+SAM_LumenValid      = false(N,1);
+SAM_NumMasks        = nan(N,1);
+SAM_RejectionReason = cell(N,1);
+
+SAM_ScoreGray   = nan(N,1);
+SAM_ScoreInv    = nan(N,1);
+SAM_ImfillScore = nan(N,1);
+SAM_LumenAreaPx = nan(N,1);
+SAM_AnchorAreaPx = nan(N,1);
+
+SAM_TextureRatio = nan(N,1);
+
 RotationAngle_deg = nan(N,1);
 
 Notes        = cell(N,1);
+
+% Clustering columns (filled after Pass 1)
+LumenClass    = repmat({'no_data'}, N, 1);
+PolarityScore = nan(N,1);
+AreaRatio     = nan(N,1);
+ClusterID     = nan(N,1);
 
 for i = 1:N
     fpath = files{i};
     [fld, base, ext] = fileparts(fpath);
     Folder{i} = fld;
     File{i}   = [base ext];
-    
+
     % Lens/Tilt from filename if present (often NaN)
     metaName = parseFromFilename(base);
     Lens_Name(i)    = metaName.lens;
     TiltDeg_Name(i) = metaName.tiltDeg;
-    
+
     % Experimental metadata (ConstH, Condition, Width, layer, replicate)
     metaExp = parseImageFilename(base);
-    
+
     % Debug print
     % fprintf('File: %s -> Cond: %s, Rep: %d\n', base, metaExp.Condition, metaExp.Replicate);
-    
+
     H_layers(i)     = metaExp.H_layers;
     Condition{i}    = metaExp.Condition;  % <--- NEW
     Width_px(i)     = metaExp.Width_px;
     Roof_layers(i)  = metaExp.Roof_layers;
     Replicate(i)    = metaExp.Replicate;
-    
+
     Notes{i} = 'PENDING';
 end
 
@@ -188,6 +209,11 @@ T = table( ...
     ScaleValue_OCR, ScaleUnits_OCR, ...
     BarPx, mmPerPx, ...
     RotationAngle_deg, ...
+    SAM_Confidence, SAM_TextureContrast, SAM_TextureRatio, SAM_LumenValid, ...
+    SAM_NumMasks, SAM_RejectionReason, ...
+    SAM_ScoreGray, SAM_ScoreInv, SAM_ImfillScore, ...
+    SAM_LumenAreaPx, SAM_AnchorAreaPx, ...
+    LumenClass, PolarityScore, AreaRatio, ClusterID, ...
     LumenArea_px, LumenWidth_px, LumenHeight_px, ...
     ... % Corner-based sag (original)
     SagDepth_px, SagDepth_mm, ...
@@ -215,7 +241,7 @@ T = table( ...
     DebrisArea_px, DebrisArea_mm2, DebrisPct_ofLumen, ...
     Notes);
 
-% Consolidated columns 
+% Consolidated columns
 Lens = Lens_Name;
 TiltDeg = TiltDeg_Name;
 T = addvars(T, Lens, 'After','File');
@@ -230,7 +256,7 @@ writetable(T, outCsv0);
 fprintf('Saved (pass0): %s\n', outCsv0);
 
 %% FILTER DUPLICATES: Keep only newest date for non-replicate overlaps
-% IMPORTANT: We must now group by 'Condition' as well. 
+% IMPORTANT: We must now group by 'Condition' as well.
 % DefaultALL and PreOptimized are DIFFERENT conditions, even if width/roof are same.
 
 fprintf('\n=== Filtering duplicate conditions (keeping newest date) ===\n');
@@ -255,18 +281,18 @@ if ~isempty(nonRepIdx)
     % Group by experimental condition AND Dataset Type (Condition)
     % We convert cell Condition to categorical for findgroups
     [G, ~] = findgroups(T.H_layers(nonRepIdx), categorical(T.Condition(nonRepIdx)), ...
-                        T.Width_px(nonRepIdx), T.Roof_layers(nonRepIdx));
-    
+        T.Width_px(nonRepIdx), T.Roof_layers(nonRepIdx));
+
     uniqueGroups = unique(G);
-    
+
     for g = 1:numel(uniqueGroups)
         groupMask = (G == uniqueGroups(g));
         groupIdx = nonRepIdx(groupMask);  % indices into T
-        
+
         if numel(groupIdx) > 1
             % Multiple entries for same condition - keep only newest
             [~, newestLocal] = max(T.ExpDate(groupIdx));
-            
+
             % Mark all but newest for removal
             for k = 1:numel(groupIdx)
                 if k ~= newestLocal
@@ -285,50 +311,48 @@ fprintf('=== Removed %d superseded experiments, %d remaining ===\n\n', nRemoved,
 
 %% PASS 1: FILL OCR + MEASUREMENTS + SAG ANALYSIS (SLOW)
 tic
-for i = 1:height(T) 
+for i = 1:height(T)
     try
         fpath = fullfile(T.Folder{i}, T.File{i});
         I = imread(fpath);
         fprintf('[%d/%d] %s\n', i, height(T), T.File{i});
-        
+
         % OCR (full image)
         ocrOut = extractLensAndScaleTextOCR(I, roi, false);
-        
+
         % Parse OCR text
         [T.Lens_OCR(i), T.TiltDeg_OCR(i)] = parseLensTiltFromOCR(ocrOut.rawText);
         [T.ScaleValue_OCR(i), T.ScaleUnits_OCR{i}] = parseScaleFromOCRText(ocrOut.rawText);
-        
+
         % Scale bar pixels
         T.BarPx(i) = measureScaleBarPixels(I, roi, thrWhite, minAreaPx, minAspectRatio, minWidthPx, debugPlots);
-        
+
         % mm/px
         if ~isnan(T.ScaleValue_OCR(i)) && T.BarPx(i) > 0
             T.mmPerPx(i) = T.ScaleValue_OCR(i) / T.BarPx(i);
         end
-      
-        % Get base name
+
+        % ============================================================
+        % SAM SEGMENTATION
+        % ============================================================
         [~, baseName, ~] = fileparts(T.File{i});
-        
-        % Define backup folder path
+
+        % Backup folder for caching SAM results
         backupDir = fullfile(T.Folder{i}, 'backup');
         if ~exist(backupDir, 'dir')
             mkdir(backupDir);
         end
-        
-        % Define path for SAM backup file
         backupFile = fullfile(backupDir, [baseName '_sam_data.mat']);
-        
-        % FORCE RE-RUN OPTION
-        forceSAM = false; 
-        
+
+        forceSAM = false;
+
         if exist(backupFile, 'file') && ~forceSAM
             loadedData = load(backupFile, 'BWlumen', 'samQuality');
-            BWlumen = loadedData.BWlumen;
+            BWlumen    = loadedData.BWlumen;
             samQuality = loadedData.samQuality;
         else
-            % Run SAM on ORIGINAL image (no rotation yet)
-            [BWlumen, samQuality] = segmentLumenSAM(I, roi, debugFolder, baseName);
-            
+            [BWlumen, samQuality] = segmentLumenSAM2(I, roi, debugFolder, baseName);
+
             try
                 save(backupFile, 'BWlumen', 'samQuality');
             catch
@@ -336,134 +360,136 @@ for i = 1:height(T)
             end
         end
 
+        % Store SAM quality fields (always — whether fresh or cached)
+        T.SAM_Confidence(i)      = samQuality.confidence;
+        T.SAM_NumMasks(i)        = samQuality.num_masks;
+        T.SAM_LumenValid(i)      = samQuality.lumen_valid;
+        T.SAM_RejectionReason{i} = samQuality.rejection_reason;
+        T.SAM_TextureContrast(i) = samQuality.texture_contrast;
+        T.SAM_TextureRatio(i)    = samQuality.texture_ratio;
+        T.SAM_ScoreGray(i)       = samQuality.score_gray;
+        T.SAM_ScoreInv(i)        = samQuality.score_inv;
+        T.SAM_ImfillScore(i)     = samQuality.imfill_score;
+        T.SAM_LumenAreaPx(i)     = samQuality.lumen_area_px;
+        T.SAM_AnchorAreaPx(i)    = samQuality.anchor_area_px;
 
-        % ================================================================
-        % ROTATION STEP: Apply AFTER SAM, BEFORE measureMembraneSag
-        % ================================================================
-        [I_rotated, BWlumen_rotated, rotationAngle] = autoRotateImage(I, BWlumen, roi, saveSagDebug, debugFolder, baseName);
-        
+        % ============================================================
+        % ROTATION: Apply AFTER SAM, BEFORE sag analysis
+        % ============================================================
+        [I_rotated, BWlumen_rotated, rotationAngle] = ...
+            autoRotateImage(I, BWlumen, roi, saveSagDebug, debugFolder, baseName);
+
+        T.RotationAngle_deg(i) = rotationAngle;
         if abs(rotationAngle) > 0.05
             fprintf('  Auto-rotated by %.2f degrees\n', rotationAngle);
         end
-        
-        % Store rotation angle in table
-        T.RotationAngle_deg(i) = rotationAngle;
-        % ================================================================
-        % END ROTATION STEP
-        % ================================================================
-      
-        % Update LumenStatus from SAM
-        if isfield(samQuality, 'polarity')
-            T.LumenStatus{i} = samQuality.polarity;
-        else
-            T.LumenStatus{i} = 'unknown';
-        end
-        
-        % Debug Figure: SAM result (show rotated version)
+
+        % ============================================================
+        % Debug: SAM result on rotated image
+        % ============================================================
         if saveSagDebug
             figSAM = figure('Visible', 'off', 'Position', [100 100 1400 500]);
             subplot(1,3,1); imshow(I_rotated); title('Image (Rotated)');
             subplot(1,3,2); imshow(BWlumen_rotated); title('SAM Mask (Rotated)');
             subplot(1,3,3); imshow(I_rotated); hold on;
-            if any(BWlumen_rotated(:)), visboundaries(BWlumen_rotated,'Color','r'); end
+            if any(BWlumen_rotated(:))
+                visboundaries(BWlumen_rotated, 'Color', 'r');
+            end
             hold off; title('Overlay');
+            sgtitle(sprintf('%s — SAM Result', baseName), 'Interpreter', 'none');
             saveas(figSAM, fullfile(debugFolder, [baseName '_SAM_debug.png']));
             close(figSAM);
         end
-        
-        % ================================================================
-        % Basic lumen metrics (use ROTATED mask)
-        % ================================================================
-        lumenFound = any(BWlumen_rotated(:));
-        sagValid = false;
-        
+
+        % ============================================================
+        % LUMEN METRICS + SAG ANALYSIS (on rotated image/mask)
+        % ============================================================
+        lumenFound = any(BWlumen_rotated(:)) && samQuality.lumen_valid;
+        sagValid   = false;
+
         if lumenFound
             rp = regionprops(BWlumen_rotated, 'Area', 'BoundingBox');
-            [~,k] = max([rp.Area]);
-            bb = rp(k).BoundingBox; 
+            [~, k] = max([rp.Area]);
+            bb = rp(k).BoundingBox;
             T.LumenArea_px(i)   = rp(k).Area;
             T.LumenWidth_px(i)  = bb(3);
             T.LumenHeight_px(i) = bb(4);
-            
-            % ===== SAG ANALYSIS (use ROTATED mask) =====
+
             sagMetrics = measureMembraneSag(BWlumen_rotated, T.mmPerPx(i), false, ...
-                                            T.H_layers(i), T.Width_px(i), ...
-                                            layerHeight_mm, pixelWidth_mm);
-            
+                T.H_layers(i), T.Width_px(i), layerHeight_mm, pixelWidth_mm);
+
             sagValid = sagMetrics.valid;
-            
+
             if sagValid
                 % --- Sag measurements ---
-                T.SagDepth_px(i)                = sagMetrics.sagDepth_px;
-                T.SagDepth_mm(i)                = sagMetrics.sagDepth_mm;
-                T.SagPct_ofMeasuredHeight(i)   = sagMetrics.sagPct_ofMeasuredHeight;
-                T.SagPct_ofTheoreticalHeight(i) = sagMetrics.sagPct_ofTheoreticalHeight;
-                T.SagPct_ofWidthSpan(i)         = sagMetrics.sagPct_ofWidthSpan;
-                T.ParabolaR2(i)                 = sagMetrics.parabolaR2;
-                
-                T.SagArea_px2(i)                = sagMetrics.sagArea_px2;
+                T.SagDepth_px(i)                   = sagMetrics.sagDepth_px;
+                T.SagDepth_mm(i)                   = sagMetrics.sagDepth_mm;
+                T.SagPct_ofMeasuredHeight(i)       = sagMetrics.sagPct_ofMeasuredHeight;
+                T.SagPct_ofTheoreticalHeight(i)    = sagMetrics.sagPct_ofTheoreticalHeight;
+                T.SagPct_ofWidthSpan(i)            = sagMetrics.sagPct_ofWidthSpan;
+                T.ParabolaR2(i)                    = sagMetrics.parabolaR2;
+                T.SagArea_px2(i)                   = sagMetrics.sagArea_px2;
 
-                % --- Validation Flags ---
-                T.IsVertexBetween(i)    = sagMetrics.isVertexBetween;
-                T.IsVertexLowerLeft(i)  = sagMetrics.isVertexLowerLeft;
-                T.IsVertexLowerRight(i) = sagMetrics.isVertexLowerRight;
-                
-                % Height
-                T.MeasuredHeight_px(i)          = sagMetrics.measuredHeight_px;
-                T.MeasuredHeight_mm(i)          = sagMetrics.measuredHeight_mm;
-                T.TheoreticalHeight_px(i)       = sagMetrics.theoreticalHeight_px;
-                T.TheoreticalHeight_mm(i)       = sagMetrics.theoreticalHeight_mm;
-                T.HeightPct_ofTheoretical(i)    = sagMetrics.heightPct_ofTheoretical;
-                
-                % Width
-                T.MeasuredWidth_px(i)           = sagMetrics.measuredWidth_px;
-                T.MeasuredWidth_mm(i)           = sagMetrics.measuredWidth_mm;
-                T.TheoreticalWidth_px(i)        = sagMetrics.theoreticalWidth_px;
-                T.TheoreticalWidth_mm(i)        = sagMetrics.theoreticalWidth_mm;
-                T.WidthPct_ofTheoretical(i)     = sagMetrics.widthPct_ofTheoretical;
-                
-                % Wall tilt
-                T.LeftWallTiltAngle_deg(i)      = sagMetrics.leftWallTiltAngle_deg;
-                T.RightWallTiltAngle_deg(i)     = sagMetrics.rightWallTiltAngle_deg;
-                T.AvgWallTiltAngle_deg(i)       = sagMetrics.avgWallTiltAngle_deg;
-                T.TotalWallInward_mm(i)         = sagMetrics.totalWallInward_mm;
-                
-                % Area
-                T.ActualArea_mm2(i)             = sagMetrics.actualArea_mm2;
-                T.TheoreticalArea_mm2(i)        = sagMetrics.theoreticalArea_mm2;
-                T.AreaPct_ofTheoretical(i)      = sagMetrics.areaPct_ofTheoretical;
-                T.ConvexityRatio(i)             = sagMetrics.convexityRatio;
+                % --- Validation flags ---
+                T.IsVertexBetween(i)               = sagMetrics.isVertexBetween;
+                T.IsVertexLowerLeft(i)             = sagMetrics.isVertexLowerLeft;
+                T.IsVertexLowerRight(i)            = sagMetrics.isVertexLowerRight;
 
-                % BoundingBox-based sag
-                T.SagDepthBB_px(i)              = sagMetrics.sagDepthBB_px;
-                T.SagDepthBB_mm(i)              = sagMetrics.sagDepthBB_mm;
-                T.SagAreaBB_px2(i)              = sagMetrics.sagAreaBB_px2;
-                T.SagAreaBB_mm2(i)              = sagMetrics.sagAreaBB_mm2;
-                T.SagBB_Pct_ofMeasuredHeight(i) = sagMetrics.sagBB_Pct_ofMeasuredHeight;
+                % --- Height ---
+                T.MeasuredHeight_px(i)             = sagMetrics.measuredHeight_px;
+                T.MeasuredHeight_mm(i)             = sagMetrics.measuredHeight_mm;
+                T.TheoreticalHeight_px(i)          = sagMetrics.theoreticalHeight_px;
+                T.TheoreticalHeight_mm(i)          = sagMetrics.theoreticalHeight_mm;
+                T.HeightPct_ofTheoretical(i)       = sagMetrics.heightPct_ofTheoretical;
+
+                % --- Width ---
+                T.MeasuredWidth_px(i)              = sagMetrics.measuredWidth_px;
+                T.MeasuredWidth_mm(i)              = sagMetrics.measuredWidth_mm;
+                T.TheoreticalWidth_px(i)           = sagMetrics.theoreticalWidth_px;
+                T.TheoreticalWidth_mm(i)           = sagMetrics.theoreticalWidth_mm;
+                T.WidthPct_ofTheoretical(i)        = sagMetrics.widthPct_ofTheoretical;
+
+                % --- Wall tilt ---
+                T.LeftWallTiltAngle_deg(i)         = sagMetrics.leftWallTiltAngle_deg;
+                T.RightWallTiltAngle_deg(i)        = sagMetrics.rightWallTiltAngle_deg;
+                T.AvgWallTiltAngle_deg(i)          = sagMetrics.avgWallTiltAngle_deg;
+                T.TotalWallInward_mm(i)            = sagMetrics.totalWallInward_mm;
+
+                % --- Area ---
+                T.ActualArea_mm2(i)                = sagMetrics.actualArea_mm2;
+                T.TheoreticalArea_mm2(i)           = sagMetrics.theoreticalArea_mm2;
+                T.AreaPct_ofTheoretical(i)         = sagMetrics.areaPct_ofTheoretical;
+                T.ConvexityRatio(i)                = sagMetrics.convexityRatio;
+
+                % --- BoundingBox sag ---
+                T.SagDepthBB_px(i)                 = sagMetrics.sagDepthBB_px;
+                T.SagDepthBB_mm(i)                 = sagMetrics.sagDepthBB_mm;
+                T.SagAreaBB_px2(i)                 = sagMetrics.sagAreaBB_px2;
+                T.SagAreaBB_mm2(i)                 = sagMetrics.sagAreaBB_mm2;
+                T.SagBB_Pct_ofMeasuredHeight(i)    = sagMetrics.sagBB_Pct_ofMeasuredHeight;
                 T.SagBB_Pct_ofTheoreticalHeight(i) = sagMetrics.sagBB_Pct_ofTheoreticalHeight;
-                T.SagBB_Pct_ofWidthSpan(i)      = sagMetrics.sagBB_Pct_ofWidthSpan;
-                T.BaselineDiff_px(i)            = sagMetrics.baselineDiff_px;
-                T.BaselineDiff_mm(i)            = sagMetrics.baselineDiff_mm;
+                T.SagBB_Pct_ofWidthSpan(i)         = sagMetrics.sagBB_Pct_ofWidthSpan;
+                T.BaselineDiff_px(i)               = sagMetrics.baselineDiff_px;
+                T.BaselineDiff_mm(i)               = sagMetrics.baselineDiff_mm;
 
-                % ===== LUMEN QUALITY ANALYSIS (use ROTATED image & mask) =====
+                % --- Lumen quality ---
                 qualityMetrics = analyzeLumenQuality(BWlumen_rotated, sagMetrics, I_rotated, T.mmPerPx(i));
-                
+
                 if qualityMetrics.valid
-                    T.LumenBrightness(i)      = qualityMetrics.brightness;
-                    T.LumenBrightnessStd(i)   = qualityMetrics.brightnessStd;
-                    T.LumenStatus{i}          = qualityMetrics.status;
-                    T.Solidity(i)             = qualityMetrics.solidity;
-                    T.DebrisArea_px(i)        = qualityMetrics.debrisArea_px;
-                    T.DebrisArea_mm2(i)       = qualityMetrics.debrisArea_mm2;
-                    T.DebrisPct_ofLumen(i)    = qualityMetrics.debrisPct_ofLumen;
+                    T.LumenBrightness(i)    = qualityMetrics.brightness;
+                    T.LumenBrightnessStd(i) = qualityMetrics.brightnessStd;
+                    T.Solidity(i)           = qualityMetrics.solidity;
+                    T.DebrisArea_px(i)      = qualityMetrics.debrisArea_px;
+                    T.DebrisArea_mm2(i)     = qualityMetrics.debrisArea_mm2;
+                    T.DebrisPct_ofLumen(i)  = qualityMetrics.debrisPct_ofLumen;
                 end
-                
-                % Save additional debug figures (use ROTATED versions)
+
+                % --- Debug figures ---
                 if saveSagDebug
                     figSag = measureMembraneSag_debugFigure(BWlumen_rotated, sagMetrics, T.File{i});
                     saveas(figSag, fullfile(debugFolder, [baseName '_sag_debug.png']));
                     close(figSag);
-                    
+
                     if qualityMetrics.valid
                         figQuality = plotLumenQualityDebug(I_rotated, BWlumen_rotated, qualityMetrics, T.File{i});
                         saveas(figQuality, fullfile(debugFolder, [baseName '_quality_debug.png']));
@@ -472,24 +498,31 @@ for i = 1:height(T)
                 end
             end
         end
-        
-        % Record status
+
+        % ============================================================
+        % STATUS — set once, at the end
+        % ============================================================
         if ~lumenFound
             T.LumenStatus{i} = 'no_lumen_detected';
-            T.Notes{i} = 'SAM: no lumen';
+            T.Notes{i}       = 'SAM: no lumen';
         elseif ~sagValid
             T.LumenStatus{i} = 'sag_analysis_failed';
-            T.Notes{i} = 'SAM OK, sag failed';
+            T.Notes{i}       = 'SAM OK, sag failed';
         else
-            T.Notes{i} = 'OK';
+            T.LumenStatus{i} = samQuality.polarity;
+            T.Notes{i}       = 'OK';
         end
-        
-        % Update consolidated columns
+
+        % Consolidated lens/tilt columns
         T.Lens(i) = T.Lens_Name(i);
-        if isnan(T.Lens(i)) && ~isnan(T.Lens_OCR(i)), T.Lens(i) = T.Lens_OCR(i); end
+        if isnan(T.Lens(i)) && ~isnan(T.Lens_OCR(i))
+            T.Lens(i) = T.Lens_OCR(i);
+        end
         T.TiltDeg(i) = T.TiltDeg_Name(i);
-        if isnan(T.TiltDeg(i)) && ~isnan(T.TiltDeg_OCR(i)), T.TiltDeg(i) = T.TiltDeg_OCR(i); end
-        
+        if isnan(T.TiltDeg(i)) && ~isnan(T.TiltDeg_OCR(i))
+            T.TiltDeg(i) = T.TiltDeg_OCR(i);
+        end
+
     catch ME
         T.Notes{i} = ['FAIL: ' ME.message];
         fprintf('  ERROR: %s\n', ME.message);
@@ -497,6 +530,11 @@ for i = 1:height(T)
     end
 end
 toc
+%% CLASSIFY LUMEN FORMATION (post-hoc clustering)
+T = classifyLumenFormation(T);
+
+%% VISUALIZE LUMEN CLASSIFICATION
+plotLumenClassification(T, resultsFolder);
 
 disp('=== TABLE AFTER PASS 1 (DATA FILLED) ===');
 disp(T(1:min(10,height(T)), {'File', 'Condition', 'SagDepth_mm', 'LumenStatus'}))
@@ -521,6 +559,10 @@ plotComparativeSag(T, resultsFolder, 'SagBB_Pct_ofMeasuredHeight', 'BoundingBox'
 % FIGURE 2: Comparative Wall Tilt
 plotWallTilt(T, resultsFolder)
 
+%% VISUALIZE OCCLUSION HEATMAP
+plotOcclusionHeatmap(T, resultsFolder);
+
+findfigs
 %% SAVE FINAL RESULTS
 outCsv = fullfile(resultsFolder, 'image_scale_results.csv');
 writetable(T, outCsv);
@@ -537,169 +579,169 @@ fprintf('Debug images saved to: %s\n', debugFolder);
 % =========================================================================
 
 function meta = parseImageFilename(base)
-    meta.H_layers    = NaN;
-    meta.Width_px    = NaN;
-    meta.Roof_layers = NaN;
+meta.H_layers    = NaN;
+meta.Width_px    = NaN;
+meta.Roof_layers = NaN;
+meta.Replicate   = 0;
+meta.Condition   = 'Unknown'; % Default
+
+% Updated Regex to capture:
+% 1. ConstH value
+% 2. Condition Tag (DefaultALL or PreOptimized)
+% 3. Width value
+% 4. Roof Layer value
+% 5. Replicate (optional)
+
+% Pattern WITH replicate suffix
+% Example: ...ConstH5_DefaultALL_Width100_1layer_1
+tok = regexp(base, 'ConstH(\d+)_([A-Za-z]+)_Width(\d+)_(\d+)layer_(\d+)$', ...
+    'tokens', 'once', 'ignorecase');
+
+if ~isempty(tok)
+    meta.H_layers    = str2double(tok{1});
+    meta.Condition   = tok{2}; % e.g., 'DefaultALL' or 'PreOptimized'
+    meta.Width_px    = str2double(tok{3});
+    meta.Roof_layers = str2double(tok{4});
+    meta.Replicate   = str2double(tok{5});
+    return;
+end
+
+% Pattern WITHOUT replicate suffix
+% Example: ...ConstH5_PreOptimized_Width100_1layer
+tok = regexp(base, 'ConstH(\d+)_([A-Za-z]+)_Width(\d+)_(\d+)layer$', ...
+    'tokens', 'once', 'ignorecase');
+
+if ~isempty(tok)
+    meta.H_layers    = str2double(tok{1});
+    meta.Condition   = tok{2};
+    meta.Width_px    = str2double(tok{3});
+    meta.Roof_layers = str2double(tok{4});
     meta.Replicate   = 0;
-    meta.Condition   = 'Unknown'; % Default
-    
-    % Updated Regex to capture:
-    % 1. ConstH value
-    % 2. Condition Tag (DefaultALL or PreOptimized)
-    % 3. Width value
-    % 4. Roof Layer value
-    % 5. Replicate (optional)
-    
-    % Pattern WITH replicate suffix
-    % Example: ...ConstH5_DefaultALL_Width100_1layer_1
-    tok = regexp(base, 'ConstH(\d+)_([A-Za-z]+)_Width(\d+)_(\d+)layer_(\d+)$', ...
-                 'tokens', 'once', 'ignorecase');
-    
-    if ~isempty(tok)
-        meta.H_layers    = str2double(tok{1});
-        meta.Condition   = tok{2}; % e.g., 'DefaultALL' or 'PreOptimized'
-        meta.Width_px    = str2double(tok{3});
-        meta.Roof_layers = str2double(tok{4});
-        meta.Replicate   = str2double(tok{5});
-        return;
-    end
-    
-    % Pattern WITHOUT replicate suffix
-    % Example: ...ConstH5_PreOptimized_Width100_1layer
-    tok = regexp(base, 'ConstH(\d+)_([A-Za-z]+)_Width(\d+)_(\d+)layer$', ...
-                 'tokens', 'once', 'ignorecase');
-    
-    if ~isempty(tok)
-        meta.H_layers    = str2double(tok{1});
-        meta.Condition   = tok{2};
-        meta.Width_px    = str2double(tok{3});
-        meta.Roof_layers = str2double(tok{4});
-        meta.Replicate   = 0;
-        return;
-    end
-    
-    disp(['Unmatched pattern: ' base]);
-    % If neither matched, throw error or warning
-    error('parseImageFilename:PatternMismatch', ...
-          'Filename does not match expected pattern: %s', base);
+    return;
+end
+
+disp(['Unmatched pattern: ' base]);
+% If neither matched, throw error or warning
+error('parseImageFilename:PatternMismatch', ...
+    'Filename does not match expected pattern: %s', base);
 end
 
 function meta = parseFromFilename(base)
-    % (Kept same as original)
-    meta.lens    = NaN;
-    meta.tiltDeg = NaN;
-    if isempty(base) || ~ischar(base), return; end
-    tok = regexp(base, '(?i)(?:^|[_\-\s])Lens[_\-\s]*(\d+)(?:$|[_\-\s])', 'tokens', 'once');
-    if isempty(tok), tok = regexp(base, '(?i)(?:^|[_\-\s])L[_\-\s]*(\d+)(?:$|[_\-\s])', 'tokens', 'once'); end
-    if ~isempty(tok) && ~isempty(tok{1}), meta.lens = str2double(tok{1}); end
-    tok = regexp(base, '(?i)(?:^|[_\-\s])Tilt[_\-\s]*([0-9]+(?:\.[0-9]+)?)(?:$|[_\-\s])', 'tokens', 'once');
-    if isempty(tok), tok = regexp(base, '(?i)(?:^|[_\-\s])T[_\-\s]*([0-9]+(?:\.[0-9]+)?)(?:$|[_\-\s])', 'tokens', 'once'); end
-    if ~isempty(tok) && ~isempty(tok{1}), meta.tiltDeg = str2double(tok{1}); end
+% (Kept same as original)
+meta.lens    = NaN;
+meta.tiltDeg = NaN;
+if isempty(base) || ~ischar(base), return; end
+tok = regexp(base, '(?i)(?:^|[_\-\s])Lens[_\-\s]*(\d+)(?:$|[_\-\s])', 'tokens', 'once');
+if isempty(tok), tok = regexp(base, '(?i)(?:^|[_\-\s])L[_\-\s]*(\d+)(?:$|[_\-\s])', 'tokens', 'once'); end
+if ~isempty(tok) && ~isempty(tok{1}), meta.lens = str2double(tok{1}); end
+tok = regexp(base, '(?i)(?:^|[_\-\s])Tilt[_\-\s]*([0-9]+(?:\.[0-9]+)?)(?:$|[_\-\s])', 'tokens', 'once');
+if isempty(tok), tok = regexp(base, '(?i)(?:^|[_\-\s])T[_\-\s]*([0-9]+(?:\.[0-9]+)?)(?:$|[_\-\s])', 'tokens', 'once'); end
+if ~isempty(tok) && ~isempty(tok{1}), meta.tiltDeg = str2double(tok{1}); end
 end
 
 function files = listImages(rootDirs, exts, recurse)
-    files = {};
-    if ischar(rootDirs), rootDirs = {rootDirs}; end
-    for d = 1:numel(rootDirs)
-        thisDir = rootDirs{d};
-        if ~exist(thisDir, 'dir'), warning('Skip %s',thisDir); continue; end
-        if recurse, listing = dir(fullfile(thisDir, '**', '*')); else, listing = dir(thisDir); end
-        for k = 1:numel(listing)
-            if listing(k).isdir, continue; end
-            [~, ~, e] = fileparts(listing(k).name);
-            if any(strcmpi(e, exts))
-                files{end+1, 1} = fullfile(listing(k).folder, listing(k).name); 
-            end
+files = {};
+if ischar(rootDirs), rootDirs = {rootDirs}; end
+for d = 1:numel(rootDirs)
+    thisDir = rootDirs{d};
+    if ~exist(thisDir, 'dir'), warning('Skip %s',thisDir); continue; end
+    if recurse, listing = dir(fullfile(thisDir, '**', '*')); else, listing = dir(thisDir); end
+    for k = 1:numel(listing)
+        if listing(k).isdir, continue; end
+        [~, ~, e] = fileparts(listing(k).name);
+        if any(strcmpi(e, exts))
+            files{end+1, 1} = fullfile(listing(k).folder, listing(k).name);
         end
     end
-    files = unique(files, 'stable');
+end
+files = unique(files, 'stable');
 end
 
 function out = extractLensAndScaleTextOCR(I, roi, debugPlots)
-    Irgb = ensureRGB(I);
-    try
-        txt = ocr(Irgb);
-        out.rawText = txt.Text;
-        out.ocrObject = txt;
-    catch
-        out.rawText = '';
-        out.ocrObject = [];
-    end
-    out.cropRect = [];
+Irgb = ensureRGB(I);
+try
+    txt = ocr(Irgb);
+    out.rawText = txt.Text;
+    out.ocrObject = txt;
+catch
+    out.rawText = '';
+    out.ocrObject = [];
+end
+out.cropRect = [];
 end
 
 function [lens, tiltDeg] = parseLensTiltFromOCR(rawText)
-    lens = NaN; tiltDeg = NaN;
-    if isempty(rawText), return; end
-    t = regexprep(rawText, '\s+', ' ');
-    tok = regexp(t, 'Lens\s*(\d+)', 'tokens', 'once', 'ignorecase');
-    if ~isempty(tok), lens = str2double(tok{1}); end
-    tok = regexp(t, 'Tilt\s*[:=]?\s*(\d+(?:\.\d+)?)', 'tokens', 'once', 'ignorecase');
-    if ~isempty(tok), tiltDeg = str2double(tok{1}); end
+lens = NaN; tiltDeg = NaN;
+if isempty(rawText), return; end
+t = regexprep(rawText, '\s+', ' ');
+tok = regexp(t, 'Lens\s*(\d+)', 'tokens', 'once', 'ignorecase');
+if ~isempty(tok), lens = str2double(tok{1}); end
+tok = regexp(t, 'Tilt\s*[:=]?\s*(\d+(?:\.\d+)?)', 'tokens', 'once', 'ignorecase');
+if ~isempty(tok), tiltDeg = str2double(tok{1}); end
 end
 
 function [val, units] = parseScaleFromOCRText(rawText)
-    val = NaN; units = '';
-    if isempty(rawText), return; end
-    t = strrep(rawText, char(181), 'u');
-    t = regexprep(t, '[—–−]', ' ');
-    t = regexprep(t, '\s+', ' ');
-    tok = regexp(t, '(\d+(?:\.\d+)?)\s*(mm|um|µm|nm)', 'tokens', 'once', 'ignorecase');
-    if ~isempty(tok)
-        val = str2double(tok{1});
-        u = lower(tok{2});
-        if strcmp(u,'µm'), u = 'um'; end
-        units = strrep(u, ' ', '');
-    end
+val = NaN; units = '';
+if isempty(rawText), return; end
+t = strrep(rawText, char(181), 'u');
+t = regexprep(t, '[—–−]', ' ');
+t = regexprep(t, '\s+', ' ');
+tok = regexp(t, '(\d+(?:\.\d+)?)\s*(mm|um|µm|nm)', 'tokens', 'once', 'ignorecase');
+if ~isempty(tok)
+    val = str2double(tok{1});
+    u = lower(tok{2});
+    if strcmp(u,'µm'), u = 'um'; end
+    units = strrep(u, ' ', '');
+end
 end
 
 function barPx = measureScaleBarPixels(I, roi, thrWhite, minAreaPx, minAspectRatio, minWidthPx, debugPlots)
-    Irgb = ensureRGB(I);
-    try, ocrOut = ocr(Irgb); words = string(ocrOut.Words); bboxes = ocrOut.WordBoundingBoxes; catch, barPx=NaN; return; end
-    if isempty(words), barPx=NaN; return; end
-    idx = find(lower(words) == "mm", 1, 'first');
-    if isempty(idx), idx = find(contains(lower(words), "mm"), 1, 'first'); end
-    if isempty(idx)
-        barPx = measureScaleBarPixels_fallback(I, roi, thrWhite, minAreaPx, minAspectRatio, minWidthPx, debugPlots);
-        return;
-    end
-    bb = bboxes(idx,:);
-    [H,W,~] = size(Irgb);
-    roiX2 = max(1, round(bb(1) - 5));
-    roiX1 = max(1, round(roiX2 - 0.30*W));
-    roiY1 = max(1, round(bb(2) - 2*bb(4)));
-    roiY2 = min(H, round(bb(2) + 3*bb(4)));
-    roiImg = Irgb(roiY1:roiY2, roiX1:roiX2, :);
-    g = im2double(rgb2gray(roiImg));
-    BW = bwareaopen(g > thrWhite, minAreaPx);
-    CC = bwconncomp(BW, 8);
-    if CC.NumObjects == 0, barPx = NaN; return; end
-    stats = regionprops(CC, 'BoundingBox');
-    bestW = 0;
-    for k = 1:numel(stats)
-        wk = stats(k).BoundingBox(3); hk = stats(k).BoundingBox(4);
-        if wk>=20 && (wk/max(hk,eps)>=5) && wk>bestW, bestW = wk; end
-    end
-    barPx = bestW; if barPx==0, barPx=NaN; end
+Irgb = ensureRGB(I);
+try, ocrOut = ocr(Irgb); words = string(ocrOut.Words); bboxes = ocrOut.WordBoundingBoxes; catch, barPx=NaN; return; end
+if isempty(words), barPx=NaN; return; end
+idx = find(lower(words) == "mm", 1, 'first');
+if isempty(idx), idx = find(contains(lower(words), "mm"), 1, 'first'); end
+if isempty(idx)
+    barPx = measureScaleBarPixels_fallback(I, roi, thrWhite, minAreaPx, minAspectRatio, minWidthPx, debugPlots);
+    return;
+end
+bb = bboxes(idx,:);
+[H,W,~] = size(Irgb);
+roiX2 = max(1, round(bb(1) - 5));
+roiX1 = max(1, round(roiX2 - 0.30*W));
+roiY1 = max(1, round(bb(2) - 2*bb(4)));
+roiY2 = min(H, round(bb(2) + 3*bb(4)));
+roiImg = Irgb(roiY1:roiY2, roiX1:roiX2, :);
+g = im2double(rgb2gray(roiImg));
+BW = bwareaopen(g > thrWhite, minAreaPx);
+CC = bwconncomp(BW, 8);
+if CC.NumObjects == 0, barPx = NaN; return; end
+stats = regionprops(CC, 'BoundingBox');
+bestW = 0;
+for k = 1:numel(stats)
+    wk = stats(k).BoundingBox(3); hk = stats(k).BoundingBox(4);
+    if wk>=20 && (wk/max(hk,eps)>=5) && wk>bestW, bestW = wk; end
+end
+barPx = bestW; if barPx==0, barPx=NaN; end
 end
 
 function barPx = measureScaleBarPixels_fallback(I, roi, thrWhite, minAreaPx, minAspectRatio, minWidthPx, debugPlots)
-    Irgb = ensureRGB(I); Ig = im2double(rgb2gray(Irgb)); [H,W] = size(Ig);
-    y0 = max(1, round(H*(1 - roi.bottomFrac))); h = max(1, round(H*roi.heightFrac));
-    x0 = max(1, round(W*roi.leftFrac) + 1); w = max(1, round(W*roi.widthFrac));
-    BW = bwareaopen(Ig(y0:min(H,y0+h-1), x0:min(W,x0+w-1)) > thrWhite, minAreaPx);
-    CC = bwconncomp(BW);
-    if CC.NumObjects == 0, barPx = NaN; return; end
-    S = regionprops(CC, 'BoundingBox');
-    widths = arrayfun(@(s) s.BoundingBox(3), S);
-    heights = arrayfun(@(s) s.BoundingBox(4), S);
-    aspect = widths ./ max(1e-9, heights);
-    isBar = (aspect >= minAspectRatio) & (widths >= minWidthPx);
-    if any(isBar), [~,k] = max(widths .* isBar); barPx = widths(k); else, [~,k] = max(widths); barPx = widths(k); end
+Irgb = ensureRGB(I); Ig = im2double(rgb2gray(Irgb)); [H,W] = size(Ig);
+y0 = max(1, round(H*(1 - roi.bottomFrac))); h = max(1, round(H*roi.heightFrac));
+x0 = max(1, round(W*roi.leftFrac) + 1); w = max(1, round(W*roi.widthFrac));
+BW = bwareaopen(Ig(y0:min(H,y0+h-1), x0:min(W,x0+w-1)) > thrWhite, minAreaPx);
+CC = bwconncomp(BW);
+if CC.NumObjects == 0, barPx = NaN; return; end
+S = regionprops(CC, 'BoundingBox');
+widths = arrayfun(@(s) s.BoundingBox(3), S);
+heights = arrayfun(@(s) s.BoundingBox(4), S);
+aspect = widths ./ max(1e-9, heights);
+isBar = (aspect >= minAspectRatio) & (widths >= minWidthPx);
+if any(isBar), [~,k] = max(widths .* isBar); barPx = widths(k); else, [~,k] = max(widths); barPx = widths(k); end
 end
 
 function Irgb = ensureRGB(I)
-    if ndims(I) == 2, Irgb = repmat(I, [1 1 3]); else, Irgb = I; end
+if ndims(I) == 2, Irgb = repmat(I, [1 1 3]); else, Irgb = I; end
 end
 
 % Include your separate 'make_clean_folder', 'segmentLumenSAM', 'measureMembraneSag', etc. functions here or in path

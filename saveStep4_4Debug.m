@@ -1,0 +1,30 @@
+function saveStep4_4Debug(I_cropped, allMasksExclusive, lumen_candidates, removed_border, debugFolder, baseName, showFigures)
+fig = newFig(showFigures, 1000, 400);
+numMasks = size(allMasksExclusive, 1);
+colors   = lines(numMasks);
+
+subplot(1,2,1);
+overlay = zeros(size(I_cropped,1), size(I_cropped,2), 3);
+for m = removed_border
+    thisMask = squeeze(allMasksExclusive(m,:,:));
+    overlay(:,:,1) = overlay(:,:,1) + double(thisMask);  % solid red
+end
+imshow(overlay);
+title(sprintf('4.4: Border-removed (red)\n%d masks removed', numel(removed_border)),'FontSize',10);
+
+subplot(1,2,2);
+overlay2 = zeros(size(I_cropped,1), size(I_cropped,2), 3);
+for m = lumen_candidates
+    thisMask = squeeze(allMasksExclusive(m,:,:));
+    for c = 1:3
+        ch = overlay2(:,:,c);
+        ch(thisMask) = colors(m,c);
+        overlay2(:,:,c) = ch;
+    end
+end
+imshow(overlay2);
+title(sprintf('4.4: Remaining candidates\n%d masks', numel(lumen_candidates)),'FontSize',10);
+
+sgtitle(sprintf('%s - STEP 4.4: Border Elimination', baseName),'Interpreter','none','FontSize',12);
+saveFig(fig, showFigures, debugFolder, baseName, '_step4_4_border.png');
+end
