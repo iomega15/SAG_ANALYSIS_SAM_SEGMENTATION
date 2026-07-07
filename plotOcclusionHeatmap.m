@@ -1,201 +1,296 @@
-function plotOcclusionHeatmap(T, resultsFolder)
-% PLOTOCCLUSIONHEATMAP Heatmap showing channel states:
-%   - Open (bright): Score = 1, GREEN
-%   - Occluded (dark): Score = 0, RED
-%   - Other (unknown/error): Not scored, shown as GRAY with '?' for debugging
+function plotOcclusionHeatmap(T, resultsFolder, source)
+%PLOTOCCLUSIONHEATMAP  Channel-state heatmap from SAM or classified labels.
+%
+%   plotOcclusionHeatmap(T, resultsFolder)           — auto-detect best source
+%   plotOcclusionHeatmap(T, resultsFolder, 'sam')    — use raw SAM polarity
+%   plotOcclusionHeatmap(T, resultsFolder, 'classified') — use post-hoc classification
+%
+% Sources:
+%   'sam'        — Uses SAM_Polarity + SAM_LumenValid (per-image SAM output)
+%   'classified' — Uses LumenStatus from classifyLumenFormation()
+%   'auto'       — Uses 'classified' if available, otherwise falls back to 'sam'
 
-    % =====================================================================
-    % CLASSIFICATION LOGIC
-    % =====================================================================
-    
-    isBright = strcmp(T.LumenStatus, 'bright');
-    isDark = strcmp(T.LumenStatus, 'dark');
-    isOther = ~isBright & ~isDark;
-    
-    % Score: 1 = bright (open), 0 = dark (occluded), NaN = other (unscored)
-    channelScore = nan(height(T), 1);
-    channelScore(isBright) = 1;
-    channelScore(isDark) = 0;
-    % isOther stays NaN (will be shown as gray '?' for debugging)
-    
-    T.ChannelScore = channelScore;
-    
-    % Log classification summary
-    fprintf('\n=== CHANNEL CLASSIFICATION SUMMARY ===\n');
-    fprintf('Total samples:     %d\n', height(T));
-    fprintf('  Open (bright):   %d (%.1f%%)\n', sum(isBright), 100*sum(isBright)/height(T));
-    fprintf('  Occluded (dark): %d (%.1f%%)\n', sum(isDark), 100*sum(isDark)/height(T));
-    fprintf('  Other/Unknown:   %d (%.1f%%) <- DEBUG: check these\n', sum(isOther), 100*sum(isOther)/height(T));
-    
-    if any(isOther)
-        fprintf('\n  Other statuses found:\n');
-        otherStatuses = unique(T.LumenStatus(isOther));
-        for s = 1:numel(otherStatuses)
-            cnt = sum(strcmp(T.LumenStatus, otherStatuses{s}));
-            fprintf('    "%s": %d\n', otherStatuses{s}, cnt);
+    %% ================================================================
+    %  RESOLVE SOURCE
+    %  ================================================================
+    if nargin < 3 || isempty(source)
+        source = 'auto';
+    end
+    source = lower(source);
+
+    has_classified = ismember('LumenStatus', T.Properties.VariableNames) && ...
+                     any(~strcmp(T.LumenStatus, 'no_data'));
+    has_sam        = ismember('SAM_Polarity', T.Properties.VariableNames) && ...
+                     ismember('SAM_LumenValid', T.Properties.VariableNames);
+
+    switch source
+        case 'auto'
+            if has_classified
+                source = 'classified';
+            elseif has_sam
+                source = 'sam';
+            else
+                error('No valid source found. Run segmentLumenSAM2 or classifyLumenFormation first.');
+            end
+            fprintf('plotOcclusionHeatmap: auto-selected source = "%s"\n', source);
+
+        case 'classified'
+            if ~has_classified
+                error('Source "classified" requested but LumenStatus column is missing or all no_data.');
+            end
+
+        case 'sam'
+            if ~has_sam
+                error('Source "sam" requested but SAM_Polarity / SAM_LumenValid columns are missing.');
+            end
+
+        otherwise
+            error('Unknown source "%s". Use "sam", "classified", or "auto".', source);
+    end
+
+    %% ================================================================
+    %  BUILD CANONICAL STATUS COLUMN
+    %  ================================================================
+    switch source
+        case 'sam'
+            statusCol = buildStatusFromSAM(T);
+            titleSuffix = '(Raw SAM)';
+            fileSuffix  = '_SAM';
+
+        case 'classified'
+            statusCol = buildStatusFromClassified(T);
+            titleSuffix = '(Classified)';
+            fileSuffix  = '_classified';
+    end
+
+    fprintf('\n=== plotOcclusionHeatmap [%s] ===\n', source);
+
+    %% ================================================================
+    %  ASSIGN NUMERIC CODES
+    %  ================================================================
+    isFailed   = strcmp(statusCol, 'failed');
+    isOccluded = strcmp(statusCol, 'occluded') | strcmp(statusCol, 'partial');
+    isOpen     = strcmp(statusCol, 'open');
+    isUnknown  = ~(isFailed | isOccluded | isOpen);
+
+    channelCode = nan(height(T), 1);
+    channelCode(isFailed)   = 1;
+    channelCode(isOccluded) = 2;
+    channelCode(isOpen)     = 3;
+    channelCode(isUnknown)  = 4;
+
+    %% ================================================================
+    %  PRINT SUMMARY
+    %  ================================================================
+    fprintf('\n=== CHANNEL CLASSIFICATION SUMMARY [%s] ===\n', source);
+    fprintf('Total samples:      %d\n', height(T));
+    fprintf('  Not Formed:       %d (%.1f%%)\n', sum(isFailed),   100*sum(isFailed)/height(T));
+    fprintf('  Occluded:         %d (%.1f%%)\n', sum(isOccluded), 100*sum(isOccluded)/height(T));
+    fprintf('  Open:             %d (%.1f%%)\n', sum(isOpen),     100*sum(isOpen)/height(T));
+    fprintf('  Unknown:          %d (%.1f%%)\n', sum(isUnknown),  100*sum(isUnknown)/height(T));
+
+    if sum(isUnknown) > 0
+        unknownStatuses = unique(statusCol(isUnknown));
+        fprintf('  Unknown statuses found:\n');
+        for u = 1:numel(unknownStatuses)
+            fprintf('    "%s": %d\n', unknownStatuses{u}, ...
+                sum(strcmp(statusCol, unknownStatuses{u})));
         end
     end
-    
-    % =====================================================================
-    % GENERATE HEATMAPS
-    % =====================================================================
-    
+
+    %% ================================================================
+    %  GENERATE HEATMAPS
+    %  ================================================================
     conditions = unique(T.Condition);
-    heights = unique(T.H_layers(~isnan(T.H_layers)));
-    
+    heights    = unique(T.H_layers(~isnan(T.H_layers)));
+
     for h = 1:numel(heights)
         for c = 1:numel(conditions)
-            thisH = heights(h);
+            thisH    = heights(h);
             thisCond = conditions{c};
-            
-            % Filter data
+
             mask = (T.H_layers == thisH) & strcmp(T.Condition, thisCond);
             subT = T(mask, :);
-            
+            subCodes = channelCode(mask);
+
             if isempty(subT) || height(subT) < 2
                 continue;
             end
-            
-            % Get unique widths and roof layers (SORTED)
-            widths = sort(unique(subT.Width_px));
+
+            widths     = sort(unique(subT.Width_px));
             roofLayers = sort(unique(subT.Roof_layers));
-            
-            nWidths = numel(widths);
-            nRoofs = numel(roofLayers);
-            
-            % Create matrices
-            scoreMatrix = nan(nRoofs, nWidths);
+            nWidths    = numel(widths);
+            nRoofs     = numel(roofLayers);
+
+            codeMatrix  = nan(nRoofs, nWidths);
             countMatrix = zeros(nRoofs, nWidths);
-            hasOtherMatrix = false(nRoofs, nWidths);  % Track if any 'other' status
-            
+
             for i = 1:height(subT)
                 wIdx = find(widths == subT.Width_px(i), 1);
                 rIdx = find(roofLayers == subT.Roof_layers(i), 1);
-                
+
                 if ~isempty(wIdx) && ~isempty(rIdx)
-                    scoreValue = subT.ChannelScore(i);
-                    
-                    if isnan(scoreValue)
-                        % Mark this cell as having 'other' status
-                        hasOtherMatrix(rIdx, wIdx) = true;
-                    else
-                        if isnan(scoreMatrix(rIdx, wIdx))
-                            scoreMatrix(rIdx, wIdx) = scoreValue;
-                            countMatrix(rIdx, wIdx) = 1;
-                        else
-                            % Running average for replicates
-                            n = countMatrix(rIdx, wIdx);
-                            scoreMatrix(rIdx, wIdx) = (scoreMatrix(rIdx, wIdx) * n + scoreValue) / (n + 1);
-                            countMatrix(rIdx, wIdx) = n + 1;
-                        end
-                    end
+                    codeMatrix(rIdx, wIdx)  = subCodes(i);
+                    countMatrix(rIdx, wIdx) = countMatrix(rIdx, wIdx) + 1;
                 end
             end
-            
-            % Create display matrix (NaN -> 0.5 for gray display)
-            displayMatrix = scoreMatrix;
-            displayMatrix(isnan(displayMatrix) & hasOtherMatrix) = 0.5;  % Gray for 'other'
-            
-            % Create figure
+
+            %% --- Draw figure ---
             fig = figure('Position', [100 100 1000 700], 'Color', 'w');
-            
-            % Custom colormap: Red (0) -> Gray (0.5) -> Green (1)
-            nColors = 256;
-            cmap = zeros(nColors, 3);
-            for i = 1:nColors
-                t = (i-1) / (nColors-1);  % 0 to 1
-                if t < 0.4
-                    % Red (occluded / dark)
-                    cmap(i, :) = [0.85, 0.2, 0.2];
-                elseif t > 0.6
-                    % Green (open / bright)
-                    cmap(i, :) = [0.2, 0.75, 0.2];
-                else
-                    % Gray (other / unknown - for debugging)
-                    cmap(i, :) = [0.6, 0.6, 0.6];
-                end
+
+            hasUnknownInPlot = any(codeMatrix(:) == 4);
+
+            if hasUnknownInPlot
+                cmapToUse = [
+                    1    0    0        % 1 = Failed   → red
+                    0    1    1        % 2 = Occluded → cyan
+                    0    1    0        % 3 = Open     → green
+                    0.80 0.80 0.80     % 4 = Unknown  → gray
+                ];
+                climVals = [1 4];
+                cbTicks  = 1:4;
+                cbLabels = {'Not Formed','Occluded','Open','Unknown'};
+            else
+                cmapToUse = [
+                    1 0 0     % 1 = Failed   → red
+                    1 1 0     % 2 = Occluded → yellow
+                    0 1 0     % 3 = Open     → green
+                ];
+                climVals = [1 3];
+                cbTicks  = 1:3;
+                cbLabels = {'Not Formed','Occluded','Open'};
             end
-            
-            % Plot heatmap
-            imagesc(1:nWidths, 1:nRoofs, displayMatrix);
-            colormap(cmap);
-            caxis([0 1]);
-            
-            % Colorbar
+
+            imagesc(1:nWidths, 1:nRoofs, codeMatrix);
+            colormap(cmapToUse);
+            caxis(climVals);
+
             cb = colorbar;
-            cb.Label.String = 'Channel State';
-            cb.Ticks = [0, 0.5, 1];
-            cb.TickLabels = {'Occluded', 'Unknown', 'Open'};
-            
-            % Set axis labels
-            set(gca, 'XTick', 1:nWidths);
-            set(gca, 'XTickLabel', arrayfun(@num2str, widths, 'UniformOutput', false));
-            set(gca, 'YTick', 1:nRoofs);
-            set(gca, 'YTickLabel', arrayfun(@num2str, roofLayers, 'UniformOutput', false));
+            cb.FontWeight = 'bold';
+            cb.FontSize   = 11;
+            cb.Ticks      = cbTicks;
+            cb.TickLabels = cbLabels;
+
+            set(gca, 'XTick', 1:nWidths, ...
+                     'XTickLabel', arrayfun(@num2str, widths, 'Uni', false));
+            set(gca, 'YTick', 1:nRoofs, ...
+                     'YTickLabel', arrayfun(@num2str, roofLayers, 'Uni', false));
             set(gca, 'YDir', 'normal');
-            
+            set(gca, 'FontWeight', 'bold', 'FontSize', 11, 'LineWidth', 1.2);
+
             if nWidths > 15
                 xtickangle(45);
             end
-            
-            % Add text annotations
+
+            %% --- Cell annotations ---
             for ri = 1:nRoofs
                 for wi = 1:nWidths
-                    val = scoreMatrix(ri, wi);
-                    n = countMatrix(ri, wi);
-                    hasOther = hasOtherMatrix(ri, wi);
-                    
-                    if ~isnan(val)
-                        % Has valid score
-                        if val > 0.75
-                            txt = 'O';      % Open
-                            clr = 'w';
-                        elseif val < 0.25
-                            txt = 'X';      % Occluded
-                            clr = 'w';
-                        else
-                            % Mixed replicates
-                            txt = sprintf('%.0f%%', val * 100);
-                            clr = 'k';
-                        end
-                    elseif hasOther
-                        % Only has 'other' status (unknown/error)
-                        txt = '?';
-                        clr = 'w';
-                    else
-                        % No data
+                    val = codeMatrix(ri, wi);
+                    n   = countMatrix(ri, wi);
+
+                    if isnan(val)
                         txt = '';
-                        clr = 'k';
+                    else
+                        switch val
+                            case 1, txt = 'F';
+                            case 2, txt = 'X';
+                            case 3, txt = 'O';
+                            case 4, txt = '?';
+                            otherwise, txt = '?';
+                        end
                     end
-                    
+
                     if ~isempty(txt)
+                        % Outline effect
+                        dx = 0.025; dy = 0.025;
+                        offsets = [-dx 0; dx 0; 0 -dy; 0 dy; ...
+                                   -dx -dy; -dx dy; dx -dy; dx dy];
+                        for kk = 1:size(offsets,1)
+                            text(wi + offsets(kk,1), ri + offsets(kk,2), txt, ...
+                                'HorizontalAlignment', 'center', ...
+                                'VerticalAlignment', 'middle', ...
+                                'FontWeight', 'bold', 'FontSize', 10, 'Color', 'k');
+                        end
                         text(wi, ri, txt, ...
-                             'HorizontalAlignment', 'center', ...
-                             'VerticalAlignment', 'middle', ...
-                             'FontWeight', 'bold', 'FontSize', 9, 'Color', clr);
+                            'HorizontalAlignment', 'center', ...
+                            'VerticalAlignment', 'middle', ...
+                            'FontWeight', 'bold', 'FontSize', 10, 'Color', 'w');
                     end
-                    
-                    % Show replicate count if > 1
+
                     if n > 1
                         text(wi, ri - 0.35, sprintf('n=%d', n), ...
-                             'HorizontalAlignment', 'center', ...
-                             'FontSize', 7, 'Color', [0.2 0.2 0.2]);
+                            'HorizontalAlignment', 'center', ...
+                            'FontSize', 7, 'FontWeight', 'bold', ...
+                            'Color', [0.2 0.2 0.2]);
                     end
                 end
             end
-            
-            xlabel('Width (printer px)', 'FontSize', 12);
-            ylabel('Roof Layers', 'FontSize', 12);
-            title(sprintf('Channel State Map: %s | H = %d layers\nO=Open, X=Occluded, ?=Unknown (debug)', ...
-                  thisCond, thisH), 'FontSize', 12);
-            grid on;
-            
-            % Save
+
+            xlabel('Width (printer px, 1 px = 32 \mum)', 'FontSize', 13, 'FontWeight', 'bold');
+            ylabel('Roof thickness (layers, 1 layer = 50 \mum)', 'FontSize', 13, 'FontWeight', 'bold');
+            title(sprintf('%s — H=%d %s', thisCond, thisH, titleSuffix), ...
+                  'FontSize', 14, 'FontWeight', 'bold');
+
+            %% --- Save ---
             if ~exist(resultsFolder, 'dir'), mkdir(resultsFolder); end
-            outFile = fullfile(resultsFolder, sprintf('channel_state_heatmap_%s_H%d.png', thisCond, thisH));
-            saveas(fig, outFile);
-            fprintf('Saved: %s\n', outFile);
-            %close(fig);
+
+            outPng = fullfile(resultsFolder, ...
+                sprintf('channel_state_heatmap_%s_H%d%s.png', thisCond, thisH, fileSuffix));
+            outPdf = fullfile(resultsFolder, ...
+                sprintf('heatmap_%s_H%d%s.pdf', thisCond, thisH, fileSuffix));
+
+            exportgraphics(fig, outPng, 'Resolution', 600);
+            exportgraphics(fig, outPdf, 'ContentType', 'vector');
+            fprintf('Saved: %s\n', outPng);
+            close(fig);
+        end
+    end
+end
+
+%% ====================================================================
+%  HELPER: Build status from raw SAM polarity
+%  ====================================================================
+function statusCol = buildStatusFromSAM(T)
+    statusCol = repmat({'failed'}, height(T), 1);
+    for i = 1:height(T)
+        if ~T.SAM_LumenValid(i)
+            statusCol{i} = 'failed';
+        else
+            pol = T.SAM_Polarity{i};
+            switch pol
+                case 'bright'
+                    statusCol{i} = 'open';
+                case 'dark'
+                    statusCol{i} = 'occluded';
+                otherwise
+                    statusCol{i} = 'failed';
+            end
+        end
+    end
+end
+
+%% ====================================================================
+%  HELPER: Build status from post-hoc classified labels
+%  ====================================================================
+function statusCol = buildStatusFromClassified(T)
+    if ismember('LumenStatus', T.Properties.VariableNames)
+        statusCol = T.LumenStatus;
+    elseif ismember('LumenClass', T.Properties.VariableNames)
+        % Fallback: translate LumenClass
+        statusCol = T.LumenClass;
+        statusCol = strrep(statusCol, 'bright',     'open');
+        statusCol = strrep(statusCol, 'dark',        'occluded');
+        statusCol = strrep(statusCol, 'not_formed',  'failed');
+        statusCol = strrep(statusCol, 'no_data',     'failed');
+    else
+        error('No LumenStatus or LumenClass column found.');
+    end
+
+    % Normalize any unexpected values
+    valid_statuses = {'open', 'occluded', 'failed', 'partial'};
+    for i = 1:numel(statusCol)
+        if ~ismember(statusCol{i}, valid_statuses)
+            statusCol{i} = 'failed';
         end
     end
 end

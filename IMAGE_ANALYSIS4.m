@@ -11,7 +11,7 @@ close all
 %% USER INPUTS
 pixelWidth_mm = 0.032;    % XY pixel resolution of the printer
 layerHeight_mm = 0.05;    % Z layer height specified to the printer
-rootDir    = pwd;
+rootDir    = 'C:\Users\rvoronov\Dropbox\MANUSCRIPTS\micromachines_valve_printing_framework\Figures\NanoClear\Sorted_ConstH5\Cross_Section_RVS2';
 recurse    = false;
 exts       = {'.png','.jpg','.jpeg','.tif','.tiff','.bmp'};
 
@@ -185,6 +185,9 @@ SAM_AnchorAreaPx = nan(N,1);
 
 SAM_TextureRatio = nan(N,1);
 
+SAM_Polarity = cell(N, 1);    % 'bright', 'dark', 'unknown'
+SAM_Status   = cell(N, 1);    % 'good', 'no_lumen_formed', 'SAM_error', etc.
+
 RotationAngle_deg = nan(N,1);
 
 Notes        = cell(N,1);
@@ -284,9 +287,11 @@ fprintf('\n=== Filtering duplicate conditions (keeping newest date) ===\n');
 % Extract date from filename (expects format: 2026_02_06_...)
 dateNums = NaT(height(T), 1);  % NaT = Not a Time
 for i = 1:height(T)
-    tok = regexp(T.File{i}, '^(\d{4}_\d{2}_\d{2})_', 'tokens', 'once');
+    tok = regexp(T.File{i}, '_(\d{2})(\d{2})(\d{2})\.', 'tokens', 'once');
     if ~isempty(tok)
-        dateNums(i) = datetime(tok{1}, 'InputFormat', 'yyyy_MM_dd');
+        % MMDDYY → parse as MM/DD/20YY
+        dateNums(i) = datetime(sprintf('20%s-%s-%s', tok{3}, tok{1}, tok{2}), ...
+            'InputFormat', 'yyyy-MM-dd');
     end
 end
 T.ExpDate = dateNums;
@@ -328,6 +333,26 @@ end
 nRemoved = sum(removeIdx);
 T(removeIdx, :) = [];
 fprintf('=== Removed %d superseded experiments, %d remaining ===\n\n', nRemoved, height(T));
+
+%% FILTER DUPLICATES
+% ... existing code ...
+fprintf('=== Removed %d superseded experiments, %d remaining ===\n\n', nRemoved, height(T));
+
+%% REPLICATE COMPLETENESS CHECK
+checkReplicateCompleteness(T);
+
+%% CHECK FOR FULL TABLE BACKUP
+fullBackupFile = fullfile(rootDir, 'T_backup.mat');
+
+if resumeRun && exist(fullBackupFile, 'file')
+    fprintf('=== Found T_backup.mat — skipping Pass 1, loading table directly ===\n');
+    load(fullBackupFile, 'T');
+    goto_postprocessing = true;
+else
+    goto_postprocessing = false;
+end
+
+if ~goto_postprocessing
 
 %% PASS 1: FILL OCR + MEASUREMENTS + SAG ANALYSIS (SLOW)
 tic
@@ -384,6 +409,9 @@ for i = 1:height(T)
         T.SAM_ImfillScore(i)     = samQuality.imfill_score;
         T.SAM_LumenAreaPx(i)     = samQuality.lumen_area_px;
         T.SAM_AnchorAreaPx(i)    = samQuality.anchor_area_px;
+
+        T.SAM_Polarity{i} = samQuality.polarity;   % 'bright'/'dark'/'unknown'
+        T.SAM_Status{i}   = samQuality.status;      % 'good'/'no_lumen_formed'/etc.
 
         % --- Rotation ---
         [I_rotated, BWlumen_rotated, rotationAngle] = ...
@@ -554,6 +582,29 @@ for i = 1:height(T)
 end
 toc
 
+%% SAVE FULL TABLE BACKUP
+save(fullBackupFile, 'T', '-v7.3');
+fprintf('Saved full table backup: %s\n', fullBackupFile);
+
+end  % closes the if ~goto_postprocessing block
+
+T.SAM_Polarity = T.LumenStatus;    % preserve before classification overwrites it
+%% Translate to canonical vocabulary (no reclassification)
+T.ClassifiedStatus = repmat({'failed'}, height(T), 1);
+for i = 1:height(T)
+    switch T.SAM_Polarity{i}
+        case 'bright',  T.ClassifiedStatus{i} = 'open';
+        case 'dark',    T.ClassifiedStatus{i} = 'occluded';
+        otherwise,      T.ClassifiedStatus{i} = 'failed';
+    end
+end
+
+%% Spatial smoothing — the ONLY post-processing that adds value
+T = spatialSmoothClassification(T);
+
+% Pre-classification heatmap (raw SAM per-image decisions)
+plotOcclusionHeatmap(T, resultsFolder, 'sam');
+
 %% CLASSIFY LUMEN FORMATION (post-hoc clustering)
 T = classifyLumenFormation(T);
 
@@ -584,7 +635,7 @@ plotComparativeSag(T, resultsFolder, 'SagBB_Pct_ofMeasuredHeight', 'BoundingBox'
 plotWallTilt(T, resultsFolder)
 
 %% VISUALIZE OCCLUSION HEATMAP
-plotOcclusionHeatmap(T, resultsFolder);
+plotOcclusionHeatmap(T, resultsFolder, 'classified');
 
 findfigs
 %% SAVE FINAL RESULTS
@@ -597,59 +648,15 @@ fprintf('Total images: %d\n', height(T));
 fprintf('Successful: %d\n', sum(strcmp(T.Notes, 'OK')));
 fprintf('Debug images saved to: %s\n', debugFolder);
 
+% Stack all figures at a known good position
+figs = findall(0, 'Type', 'figure');
+for i = 1:numel(figs)
+    set(figs(i), 'Position', [50 + (i-1)*30, 50, 900, 650]);
+end
 
 %% =========================================================================
 % LOCAL FUNCTIONS
 % =========================================================================
-
-function meta = parseImageFilename(base)
-meta.H_layers    = NaN;
-meta.Width_px    = NaN;
-meta.Roof_layers = NaN;
-meta.Replicate   = 0;
-meta.Condition   = 'Unknown'; % Default
-
-% Updated Regex to capture:
-% 1. ConstH value
-% 2. Condition Tag (DefaultALL or PreOptimized)
-% 3. Width value
-% 4. Roof Layer value
-% 5. Replicate (optional)
-
-% Pattern WITH replicate suffix
-% Example: ...ConstH5_DefaultALL_Width100_1layer_1
-tok = regexp(base, 'ConstH(\d+)_([A-Za-z]+)_Width(\d+)_(\d+)layer_(\d+)$', ...
-    'tokens', 'once', 'ignorecase');
-
-if ~isempty(tok)
-    meta.H_layers    = str2double(tok{1});
-    meta.Condition   = tok{2}; % e.g., 'DefaultALL' or 'PreOptimized'
-    meta.Width_px    = str2double(tok{3});
-    meta.Roof_layers = str2double(tok{4});
-    meta.Replicate   = str2double(tok{5});
-    return;
-end
-
-% Pattern WITHOUT replicate suffix
-% Example: ...ConstH5_PreOptimized_Width100_1layer
-tok = regexp(base, 'ConstH(\d+)_([A-Za-z]+)_Width(\d+)_(\d+)layer$', ...
-    'tokens', 'once', 'ignorecase');
-
-if ~isempty(tok)
-    meta.H_layers    = str2double(tok{1});
-    meta.Condition   = tok{2};
-    meta.Width_px    = str2double(tok{3});
-    meta.Roof_layers = str2double(tok{4});
-    meta.Replicate   = 0;
-    return;
-end
-
-disp(['Unmatched pattern: ' base]);
-% If neither matched, throw error or warning
-error('parseImageFilename:PatternMismatch', ...
-    'Filename does not match expected pattern: %s', base);
-end
-
 function meta = parseFromFilename(base)
 % (Kept same as original)
 meta.lens    = NaN;

@@ -1,9 +1,19 @@
 function T = classifyLumenFormation(T)
-%CLASSIFYLUMENFORMATION  Classify lumens as bright/dark/not_formed.
+%CLASSIFYLUMENFORMATION  Classify lumens as open/occluded/failed.
+%
+% Writes results into T.LumenStatus using canonical vocabulary:
+%   'open'      — bright lumen (channel is open)
+%   'occluded'  — dark lumen (channel formed but is blocked/dark)
+%   'failed'    — not formed (no real lumen detected)
+%   'no_data'   — insufficient SAM data to classify
 %
 % Two-stage classification:
-%   Stage 1: formed vs not_formed using ImfillScore + TextureRatio
-%   Stage 2: bright vs dark using PolarityScore
+%   Stage 1: formed vs failed using ImfillScore + TextureRatio
+%   Stage 2: open vs occluded using PolarityScore
+%
+% Also writes diagnostic columns: PolarityScore, AreaRatio, LumenClass
+%   LumenClass preserves the raw classifier labels (bright/dark/not_formed)
+%   for debugging; LumenStatus is the canonical column used by all plots.
 
 % --- Compute derived features ---
 T.PolarityScore = (T.SAM_ScoreInv - T.SAM_ScoreGray) ./ ...
@@ -18,11 +28,14 @@ has_data = T.SAM_LumenValid & ...
            ~isnan(T.AreaRatio);
 
 n_valid = sum(has_data);
-fprintf('Classifying %d lumens into bright/dark/not_formed\n', n_valid);
+fprintf('Classifying %d lumens into open/occluded/failed\n', n_valid);
 
-% --- Initialize output ---
+% --- Initialize output columns ---
 if ~ismember('LumenClass', T.Properties.VariableNames)
     T.LumenClass = repmat({'no_data'}, height(T), 1);
+end
+if ~ismember('LumenStatus', T.Properties.VariableNames)
+    T.LumenStatus = repmat({'no_data'}, height(T), 1);
 end
 
 if n_valid < 3
@@ -35,19 +48,16 @@ valid_idx = find(has_data);
 % =====================================================================
 %  Stage 1: Formed vs Not Formed
 % =====================================================================
-% Formed lumens have: high imfill AND low texture ratio
-% Use Otsu on ImfillScore to find the natural split
-
 imfill_vals  = T.SAM_ImfillScore(has_data);
 texture_vals = T.SAM_TextureRatio(has_data);
 
-% Adaptive imfill threshold via Otsu on the imfill scores
-imfill_normed = (imfill_vals - min(imfill_vals)) / (max(imfill_vals) - min(imfill_vals) + 1e-6);
+% Adaptive imfill threshold via Otsu
+imfill_normed = (imfill_vals - min(imfill_vals)) / ...
+                (max(imfill_vals) - min(imfill_vals) + 1e-6);
 imfill_thresh_normed = graythresh(imfill_normed);
 imfill_thresh = imfill_thresh_normed * (max(imfill_vals) - min(imfill_vals)) + min(imfill_vals);
 
-% Texture ratio threshold — formed lumens should be below this
-texture_thresh = 0.15;  % lumens are voids, texture ratio should be near 0
+texture_thresh = 0.15;
 
 fprintf('  Imfill threshold (Otsu): %.1f\n', imfill_thresh);
 fprintf('  Texture threshold: %.2f\n', texture_thresh);
@@ -58,29 +68,45 @@ is_formed = (T.SAM_ImfillScore(has_data) >= imfill_thresh) & ...
 % =====================================================================
 %  Stage 2: Bright vs Dark (among formed only)
 % =====================================================================
-% PolarityScore > 0 → bright lumen (dark void filled by imfill)
-% PolarityScore < 0 → dark lumen (bright void filled by inverse imfill)
-
 polarity_vals = T.PolarityScore(has_data);
+
+% Raw classifier label → canonical status mapping:
+%   bright      → open
+%   dark        → occluded
+%   not_formed  → failed
 
 for j = 1:n_valid
     row = valid_idx(j);
     if is_formed(j)
         if polarity_vals(j) > 0
-            T.LumenClass{row} = 'bright';
+            T.LumenClass{row}  = 'bright';
+            T.LumenStatus{row} = 'open';
         else
-            T.LumenClass{row} = 'dark';
+            T.LumenClass{row}  = 'dark';
+            T.LumenStatus{row} = 'occluded';
         end
     else
-        T.LumenClass{row} = 'not_formed';
+        T.LumenClass{row}  = 'not_formed';
+        T.LumenStatus{row} = 'failed';
     end
 end
 
 % --- Print summary ---
-cats   = categories(categorical(T.LumenClass));
-counts = countcats(categorical(T.LumenClass));
-fprintf('\nClassification counts:\n');
-for j = 1:numel(cats)
-    fprintf('  %-12s: %d\n', cats{j}, counts(j));
+fprintf('\nClassification results:\n');
+fprintf('  %-15s  %-15s  %s\n', 'LumenClass', 'LumenStatus', 'Count');
+fprintf('  %-15s  %-15s  %s\n', '-----------', '-----------', '-----');
+
+% Map for display
+classLabels  = {'bright', 'dark', 'not_formed', 'no_data'};
+statusLabels = {'open',   'occluded', 'failed',  'no_data'};
+
+for j = 1:numel(classLabels)
+    n = sum(strcmp(T.LumenClass, classLabels{j}));
+    if n > 0
+        fprintf('  %-15s  %-15s  %d (%.1f%%)\n', ...
+            classLabels{j}, statusLabels{j}, n, 100*n/height(T));
+    end
 end
+fprintf('  Total: %d\n', height(T));
+
 end

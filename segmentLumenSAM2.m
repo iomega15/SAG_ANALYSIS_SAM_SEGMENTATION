@@ -67,17 +67,29 @@ end
 tempFile = fullfile(tempdir, 'temp_sam_input.png');
 imwrite(I_cropped, tempFile);
 
-checkpointFile = fullfile(fileparts(pwd), 'sam_vit_b_01ec64.pth');
-if ~exist(checkpointFile, 'file')
-    if exist(fullfile(pwd, 'sam_vit_b_01ec64.pth'), 'file')
-        checkpointFile = fullfile(pwd, 'sam_vit_b_01ec64.pth');
-    else
-        quality.status           = 'checkpoint_not_found';
-        quality.rejection_reason = 'SAM checkpoint not found';
-        warning('SAM checkpoint not found');
-        if exist(tempFile, 'file'), delete(tempFile); end
-        return;
+thisFileDir = fileparts(mfilename('fullpath'));
+
+candidatePaths = { ...
+    fullfile(thisFileDir, 'sam_vit_b_01ec64.pth'), ...
+    fullfile(fileparts(thisFileDir), 'sam_vit_b_01ec64.pth'), ...
+    fullfile(pwd, 'sam_vit_b_01ec64.pth'), ...
+    fullfile(fileparts(pwd), 'sam_vit_b_01ec64.pth')};
+
+checkpointFile = '';
+
+for k = 1:numel(candidatePaths)
+    if exist(candidatePaths{k}, 'file')
+        checkpointFile = candidatePaths{k};
+        break;
     end
+end
+
+if isempty(checkpointFile)
+    quality.status           = 'checkpoint_not_found';
+    quality.rejection_reason = 'SAM checkpoint not found';
+    warning('SAM checkpoint not found');
+    if exist(tempFile, 'file'), delete(tempFile); end
+    return;
 end
 
 try
