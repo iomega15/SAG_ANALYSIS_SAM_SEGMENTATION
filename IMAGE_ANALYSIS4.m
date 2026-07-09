@@ -27,6 +27,8 @@ minWidthPx     = 50;
 
 debugPlots     = false;       % For scale bar visualization
 saveSagDebug   = true;        % Save sag analysis debug images
+saveSamDebugFigures = true;   % SAM per-step debug figures (Step0..4_8). ON for review;
+                              % set false only for the final trusted production run.
 
 resumeRun = true;    % true = keep existing debug/results, false = clean start
 
@@ -59,6 +61,23 @@ if resumeRun && exist(resultsFolder, 'dir')
 else
     make_clean_folder(resultsFolder);
     fprintf('Results folder cleaned: %s\n', resultsFolder);
+end
+
+%% SAM MASK CACHE
+% Lives OUTSIDE results/backup so a clean start (resumeRun=false) does NOT wipe
+% it. This decouples SAM inference from the sag measurement: re-tuning the sag
+% algorithm re-reads cached masks (skipping SAM + its ~17 step figures) while
+% still recomputing and re-rendering all sag/quality debug figures. Delete this
+% folder manually to force full re-segmentation (e.g. after changing SAM or roi).
+samMaskCacheDir = fullfile(rootDir, 'SAM_MASK_CACHE');
+if ~exist(samMaskCacheDir, 'dir'); mkdir(samMaskCacheDir); end
+
+% SAM per-step debug figures render only when a debug folder is passed to
+% segmentLumenSAM2; gate that with the toggle.
+if saveSamDebugFigures
+    samDebugArg = debugFolder;
+else
+    samDebugArg = '';
 end
 %% FIND IMAGES
 % Additional directories to include
@@ -395,8 +414,26 @@ for i = 1:height(T)
             continue;
         end
 
-        % --- SAM segmentation ---
-        [BWlumen, samQuality] = segmentLumenSAM2(I, roi, debugFolder, baseName);
+        % --- SAM segmentation (mask-cached: re-tuning sag skips SAM) ---
+        maskCacheFile = fullfile(samMaskCacheDir, [baseName '_openmask.mat']);
+        gotCachedMask = false;
+        if exist(maskCacheFile, 'file') && ~forceSAM
+            try
+                Sm = load(maskCacheFile, 'BWlumen', 'samQuality');
+                BWlumen = Sm.BWlumen; samQuality = Sm.samQuality;
+                gotCachedMask = true;
+                fprintf('  [SAM mask cached]\n');
+            catch
+                gotCachedMask = false;
+            end
+        end
+        if ~gotCachedMask
+            [BWlumen, samQuality] = segmentLumenSAM2(I, roi, samDebugArg, baseName);
+            try
+                save(maskCacheFile, 'BWlumen', 'samQuality', '-v7.3');
+            catch
+            end
+        end
 
         T.SAM_Confidence(i)      = samQuality.confidence;
         T.SAM_NumMasks(i)        = samQuality.num_masks;
@@ -430,11 +467,14 @@ for i = 1:height(T)
             subplot(1,3,2); imshow(BWlumen_rotated); title('SAM Mask (Rotated)');
             subplot(1,3,3); imshow(I_rotated); hold on;
             if any(BWlumen_rotated(:))
-                visboundaries(BWlumen_rotated,'Color','r');
+                B = bwboundaries(BWlumen_rotated, 'noholes');   % faster than visboundaries
+                for bi = 1:numel(B)
+                    plot(B{bi}(:,2), B{bi}(:,1), 'r-', 'LineWidth', 1.0);
+                end
             end
             hold off; title('Overlay');
             sgtitle(sprintf('%s — SAM Result', baseName),'Interpreter','none');
-            saveas(figSAM, fullfile(debugFolder,[baseName '_SAM_debug.png']));
+            exportgraphics(figSAM, fullfile(debugFolder,[baseName '_SAM_debug.png']), 'Resolution', 120);
             close(figSAM); figSAM = [];
         end
 
@@ -511,14 +551,14 @@ for i = 1:height(T)
                 % --- Debug figures ---
                 if saveSagDebug
                     figSag = measureMembraneSag_debugFigure(BWlumen_rotated, sagMetrics, T.File{i});
-                    saveas(figSag, fullfile(debugFolder,[baseName '_sag_debug.png']));
+                    exportgraphics(figSag, fullfile(debugFolder,[baseName '_sag_debug.png']), 'Resolution', 120);
                     close(figSag); figSag = [];
 
                     if qualityMetrics.valid
                         figQuality = plotLumenQualityDebug(I_rotated, BWlumen_rotated, ...
                                                            qualityMetrics, T.File{i});
-                        saveas(figQuality, fullfile(debugFolder, ...
-                               [baseName '_quality_debug.png']));
+                        exportgraphics(figQuality, fullfile(debugFolder, ...
+                               [baseName '_quality_debug.png']), 'Resolution', 120);
                         close(figQuality); figQuality = [];
                     end
                 end
