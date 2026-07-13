@@ -11,7 +11,16 @@ close all
 %% USER INPUTS
 pixelWidth_mm = 0.032;    % XY pixel resolution of the printer
 layerHeight_mm = 0.05;    % Z layer height specified to the printer
-rootDir    = 'C:\Users\rvoronov\Dropbox\MANUSCRIPTS\micromachines_valve_printing_framework\Figures\NanoClear\Sorted_ConstH5\Cross_Section_RVS2';
+
+% Resolve paths relative to this machine's Dropbox root so the identical
+% script runs on the laptop (C:\Users\rvoronov\Dropbox) and on Olympus
+% (C:\Users\Professor\Dropbox) without edits.
+dropboxRoot = fullfile(getenv('USERPROFILE'), 'Dropbox');
+if ~exist(dropboxRoot, 'dir')
+    error('Dropbox root not found at %s. Set dropboxRoot manually.', dropboxRoot);
+end
+rootDir    = fullfile(dropboxRoot, 'MANUSCRIPTS', 'micromachines_valve_printing_framework', ...
+    'Figures', 'NanoClear', 'Sorted_ConstH5', 'Cross_Section_RVS2');
 recurse    = false;
 exts       = {'.png','.jpg','.jpeg','.tif','.tiff','.bmp'};
 
@@ -30,7 +39,17 @@ saveSagDebug   = true;        % Save sag analysis debug images
 saveSamDebugFigures = true;   % SAM per-step debug figures (Step0..4_8). ON for review;
                               % set false only for the final trusted production run.
 
-resumeRun = true;    % true = keep existing debug/results, false = clean start
+resumeRun = false;    % true = keep existing debug/results, false = clean start
+
+% Result cache (the per-image `backup\*_full_results.mat` full-row cache and the
+% end-of-run `T_backup.mat`). When ON, a finished row is reloaded verbatim,
+% SKIPPING both SAM *and* the sag measurement. That is what you want only for a
+% final production run you might need to resume after an interruption.
+% During sag-ALGORITHM tuning keep this OFF: every run then recomputes sag from
+% the (still-cached) SAM masks, so you actually see your new algorithm's output.
+% NOTE: this is independent of SAM_MASK_CACHE, which stays on regardless and is
+% the layer that makes re-tuning fast (skips SAM, not sag).
+useResultCache = false;
 
 %% CREATE BACKUP FOLDER
 backupDir = fullfile(rootDir, 'backup');
@@ -54,6 +73,14 @@ if saveSagDebug
     end
 end
 
+% Only the 7-panel per-image SAM summary (`*_FINAL.png`) is written to the top
+% level of debugFolder, so it can be scrolled through quickly for failure
+% flagging. Every other, more granular debug figure (SAM per-step figures, the
+% rotation/SAM/sag/quality panels) goes into this subfolder — useful for the
+% deep-dive on a flagged case, but out of the way during quick review.
+debugStepsFolder = fullfile(debugFolder, 'detailed_steps');
+if saveSagDebug && ~exist(debugStepsFolder, 'dir'); mkdir(debugStepsFolder); end
+
 %% CREATE RESULTS FOLDER
 resultsFolder = fullfile(rootDir, 'results');
 if resumeRun && exist(resultsFolder, 'dir')
@@ -63,12 +90,16 @@ else
     fprintf('Results folder cleaned: %s\n', resultsFolder);
 end
 
-%% SAM MASK CACHE
+%% SAM MASK CACHE (raw SAM output, pre-selection)
 % Lives OUTSIDE results/backup so a clean start (resumeRun=false) does NOT wipe
-% it. This decouples SAM inference from the sag measurement: re-tuning the sag
-% algorithm re-reads cached masks (skipping SAM + its ~17 step figures) while
-% still recomputing and re-rendering all sag/quality debug figures. Delete this
-% folder manually to force full re-segmentation (e.g. after changing SAM or roi).
+% it. Holds the RAW SAM output per image (<baseName>_samraw.mat: all masks +
+% confidence, saved inside segmentLumenSAM2 right after inference). Because the
+% cache is PRE-selection, the candidate-selection/validation logic can be
+% re-tuned and re-run cheaply — only the pyrunfile/torch inference is skipped;
+% selection, texture gates, and all debug figures re-run every time. Delete
+% this folder manually only if the input images or roi change. (Older
+% *_openmask.mat files here are from the retired final-mask cache — ignored,
+% safe to delete.)
 samMaskCacheDir = fullfile(rootDir, 'SAM_MASK_CACHE');
 if ~exist(samMaskCacheDir, 'dir'); mkdir(samMaskCacheDir); end
 
@@ -363,7 +394,7 @@ checkReplicateCompleteness(T);
 %% CHECK FOR FULL TABLE BACKUP
 fullBackupFile = fullfile(rootDir, 'T_backup.mat');
 
-if resumeRun && exist(fullBackupFile, 'file')
+if resumeRun && useResultCache && exist(fullBackupFile, 'file')
     fprintf('=== Found T_backup.mat — skipping Pass 1, loading table directly ===\n');
     load(fullBackupFile, 'T');
     goto_postprocessing = true;
@@ -406,34 +437,47 @@ for i = 1:height(T)
         backupFile = fullfile(backupDir, [baseName '_full_results.mat']);
         forceSAM   = false;
 
-        if exist(backupFile, 'file') && ~forceSAM
+        if useResultCache && exist(backupFile, 'file') && ~forceSAM
             loadedData = load(backupFile, 'rowTable');  % only load what's needed
-            T(i,:) = loadedData.rowTable;
-            clear loadedData I
-            fprintf('  [CACHED]\n');
-            continue;
+            % Schema guard: a full-row cache written by an OLDER version of this
+            % script has a different set of columns, and `T(i,:) = rowTable`
+            % demands an exact match (this used to crash every cached image with
+            % "The number of table variables in an assignment must match"). If it
+            % no longer matches the current table, ignore the stale cache and
+            % recompute this row instead of erroring.
+            if width(loadedData.rowTable) == width(T) && ...
+                    isequal(loadedData.rowTable.Properties.VariableNames, T.Properties.VariableNames)
+                T(i,:) = loadedData.rowTable;
+                clear loadedData I
+                fprintf('  [CACHED]\n');
+                continue;
+            else
+                fprintf('  [stale cache ignored — schema changed, recomputing]\n');
+                clear loadedData
+            end
         end
 
-        % --- SAM segmentation (mask-cached: re-tuning sag skips SAM) ---
-        maskCacheFile = fullfile(samMaskCacheDir, [baseName '_openmask.mat']);
-        gotCachedMask = false;
-        if exist(maskCacheFile, 'file') && ~forceSAM
-            try
-                Sm = load(maskCacheFile, 'BWlumen', 'samQuality');
-                BWlumen = Sm.BWlumen; samQuality = Sm.samQuality;
-                gotCachedMask = true;
-                fprintf('  [SAM mask cached]\n');
-            catch
-                gotCachedMask = false;
-            end
+        % --- SAM segmentation ---
+        % The cache moved INSIDE segmentLumenSAM2 and now holds the RAW SAM
+        % output (<baseName>_samraw.mat in samMaskCacheDir), pre-selection.
+        % Caching the raw masks (instead of the old final-lumen _openmask.mat,
+        % which went stale the moment the selection logic changed) lets the
+        % candidate-selection/validation stages be re-tuned and re-run cheaply
+        % without re-running SAM inference. Old *_openmask.mat files are
+        % simply ignored and can be deleted.
+        %
+        % Expected lumen cross-section (image px) from nominal geometry and
+        % the OCR-measured scale — physical plausibility gate in the selector.
+        if ~isnan(T.mmPerPx(i)) && T.mmPerPx(i) > 0
+            expW_px = T.Width_px(i)  * pixelWidth_mm  / T.mmPerPx(i);   % Width_px = printer px
+            expH_px = T.H_layers(i)  * layerHeight_mm / T.mmPerPx(i);
+            expectedLumenArea_px = expW_px * expH_px;
+        else
+            expectedLumenArea_px = NaN;   % OCR scale unavailable -> gate skipped
         end
-        if ~gotCachedMask
-            [BWlumen, samQuality] = segmentLumenSAM2(I, roi, samDebugArg, baseName);
-            try
-                save(maskCacheFile, 'BWlumen', 'samQuality', '-v7.3');
-            catch
-            end
-        end
+
+        [BWlumen, samQuality] = segmentLumenSAM2(I, roi, samDebugArg, baseName, ...
+            samMaskCacheDir, expectedLumenArea_px);
 
         T.SAM_Confidence(i)      = samQuality.confidence;
         T.SAM_NumMasks(i)        = samQuality.num_masks;
@@ -452,7 +496,7 @@ for i = 1:height(T)
 
         % --- Rotation ---
         [I_rotated, BWlumen_rotated, rotationAngle] = ...
-            autoRotateImage(I, BWlumen, roi, saveSagDebug, debugFolder, baseName);
+            autoRotateImage(I, BWlumen, roi, saveSagDebug, debugStepsFolder, baseName);
         T.RotationAngle_deg(i) = rotationAngle;
         clear I BWlumen  % originals no longer needed
 
@@ -474,7 +518,7 @@ for i = 1:height(T)
             end
             hold off; title('Overlay');
             sgtitle(sprintf('%s — SAM Result', baseName),'Interpreter','none');
-            exportgraphics(figSAM, fullfile(debugFolder,[baseName '_SAM_debug.png']), 'Resolution', 120);
+            exportgraphics(figSAM, fullfile(debugStepsFolder,[baseName '_SAM_debug.png']), 'Resolution', 120);
             close(figSAM); figSAM = [];
         end
 
@@ -551,13 +595,13 @@ for i = 1:height(T)
                 % --- Debug figures ---
                 if saveSagDebug
                     figSag = measureMembraneSag_debugFigure(BWlumen_rotated, sagMetrics, T.File{i});
-                    exportgraphics(figSag, fullfile(debugFolder,[baseName '_sag_debug.png']), 'Resolution', 120);
+                    exportgraphics(figSag, fullfile(debugStepsFolder,[baseName '_sag_debug.png']), 'Resolution', 120);
                     close(figSag); figSag = [];
 
                     if qualityMetrics.valid
                         figQuality = plotLumenQualityDebug(I_rotated, BWlumen_rotated, ...
                                                            qualityMetrics, T.File{i});
-                        exportgraphics(figQuality, fullfile(debugFolder, ...
+                        exportgraphics(figQuality, fullfile(debugStepsFolder, ...
                                [baseName '_quality_debug.png']), 'Resolution', 120);
                         close(figQuality); figQuality = [];
                     end
@@ -589,9 +633,11 @@ for i = 1:height(T)
             T.TiltDeg(i) = T.TiltDeg_OCR(i);
         end
 
-        % --- Save backup ---
-        rowTable = T(i,:);
-        save(backupFile, 'BWlumen_rotated', 'samQuality', 'rowTable');
+        % --- Save backup (only when the result cache is in use) ---
+        if useResultCache
+            rowTable = T(i,:);
+            save(backupFile, 'BWlumen_rotated', 'samQuality', 'rowTable');
+        end
 
     catch ME
         T.Notes{i} = ['FAIL: ' ME.message];
@@ -622,9 +668,11 @@ for i = 1:height(T)
 end
 toc
 
-%% SAVE FULL TABLE BACKUP
-save(fullBackupFile, 'T', '-v7.3');
-fprintf('Saved full table backup: %s\n', fullBackupFile);
+%% SAVE FULL TABLE BACKUP (only when the result cache is in use)
+if useResultCache
+    save(fullBackupFile, 'T', '-v7.3');
+    fprintf('Saved full table backup: %s\n', fullBackupFile);
+end
 
 end  % closes the if ~goto_postprocessing block
 

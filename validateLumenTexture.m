@@ -5,7 +5,9 @@ RATIO_THRESHOLD = 1.0;
 is_valid = false;
 
 if isempty(selected_mask_idx)
-    quality.rejection_reason = 'No lumen candidate was selected';
+    if isempty(quality.rejection_reason)   % keep a more specific upstream reason (e.g. the 4.7b size gate)
+        quality.rejection_reason = 'No lumen candidate was selected';
+    end
     return;
 end
 

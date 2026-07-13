@@ -1,5 +1,14 @@
-function [BWlumen, quality] = segmentLumenSAM2(I, roi, debugFolder, baseName)
+function [BWlumen, quality] = segmentLumenSAM2(I, roi, debugFolder, baseName, rawCacheDir, expectedLumenArea_px)
 % SEGMENTLUMENSAM: Center-based SAM + Texture Clustering Validation
+%
+% rawCacheDir (optional): folder for caching the RAW SAM output (all masks,
+%   pre-selection) as <baseName>_samraw.mat. Caching the raw output rather
+%   than the final selected lumen means the candidate-selection / validation
+%   logic below can be re-tuned and re-run cheaply without re-running SAM
+%   inference. Delete the cache only if the input images or roi change.
+% expectedLumenArea_px (optional): expected lumen cross-section in image
+%   pixels (from nominal W x H and the OCR scale). Used as a physical
+%   plausibility gate on the selected candidate; pass NaN/[] to skip.
 
 %% ====================================================================
 SHOW_DEBUG_FIGURES = false;
@@ -27,8 +36,23 @@ quality.anchor_density   = 0;
 
 if nargin < 3, debugFolder = ''; end
 if nargin < 4, baseName = 'image'; end
+if nargin < 5, rawCacheDir = ''; end
+if nargin < 6 || isempty(expectedLumenArea_px), expectedLumenArea_px = NaN; end
+
+quality.expected_lumen_area_px = expectedLumenArea_px;
+quality.area_vs_expected       = NaN;
 
 saveDebug = ~isempty(debugFolder) && exist(debugFolder, 'dir');
+
+% The 7-panel per-image summary (`*_FINAL.png`, saveFinalSummaryDebug) goes to
+% the top level of the debug folder for quick failure-flagging; every granular
+% per-step figure below is routed into a `detailed_steps` subfolder so it stays
+% out of the way during that quick review. `debugParent` keeps the top level.
+debugParent = debugFolder;
+if saveDebug
+    debugFolder = fullfile(debugFolder, 'detailed_steps');   % step figs land here
+    if ~exist(debugFolder, 'dir'); mkdir(debugFolder); end
+end
 
 %% ====================================================================
 % STEP 0: INPUT PREPARATION
@@ -96,25 +120,56 @@ try
     %% ================================================================
     % STEP 2: RUN SAM
     % ================================================================
-    fprintf('Running SAM...\n');
-    tic;
     target_y_cropped = target_y;
 
-    [lumen_mask_out, confidence_score, all_masks_out, num_masks] = pyrunfile( ...
-        "sam_segment_all.py", ...
-        ["lumen_mask_out", "confidence_score", "all_masks_out", "num_masks"], ...
-        image_path=tempFile, ...
-        checkpoint_path=checkpointFile, ...
-        target_x=int32(target_x), ...
-        target_y=int32(target_y_cropped));
+    % --- Raw-SAM cache: skip inference if this image's raw masks are cached ---
+    gotRaw = false;
+    rawCacheFile = '';
+    if ~isempty(rawCacheDir)
+        if ~exist(rawCacheDir, 'dir'); mkdir(rawCacheDir); end
+        rawCacheFile = fullfile(rawCacheDir, [baseName '_samraw.mat']);
+        if exist(rawCacheFile, 'file')
+            try
+                Sr = load(rawCacheFile, 'BW_center_raw', 'confidence', 'allMasks', 'numMasks');
+                BW_center_raw = Sr.BW_center_raw;
+                quality.confidence = Sr.confidence;
+                allMasks  = Sr.allMasks;
+                numMasks  = Sr.numMasks;
+                gotRaw = true;
+                fprintf('  [raw SAM output cached]\n');
+            catch
+                gotRaw = false;
+            end
+        end
+    end
 
-    fprintf('SAM completed in %.1f seconds\n', toc);
+    if ~gotRaw
+        fprintf('Running SAM...\n');
+        tic;
+        [lumen_mask_out, confidence_score, all_masks_out, num_masks] = pyrunfile( ...
+            "sam_segment_all.py", ...
+            ["lumen_mask_out", "confidence_score", "all_masks_out", "num_masks"], ...
+            image_path=tempFile, ...
+            checkpoint_path=checkpointFile, ...
+            target_x=int32(target_x), ...
+            target_y=int32(target_y_cropped));
 
-    BW_center_raw      = logical(lumen_mask_out);
-    quality.confidence = double(confidence_score);
-    allMasks           = logical(all_masks_out);
-    numMasks           = double(num_masks);
-    quality.num_masks  = numMasks;
+        fprintf('SAM completed in %.1f seconds\n', toc);
+
+        BW_center_raw      = logical(lumen_mask_out);
+        quality.confidence = double(confidence_score);
+        allMasks           = logical(all_masks_out);
+        numMasks           = double(num_masks);
+
+        if ~isempty(rawCacheFile)
+            try
+                confidence = quality.confidence;
+                save(rawCacheFile, 'BW_center_raw', 'confidence', 'allMasks', 'numMasks', '-v7.3');
+            catch
+            end
+        end
+    end
+    quality.num_masks = numMasks;
 
     if saveDebug || SHOW_DEBUG_FIGURES
         saveStep1Debug(I_cropped, BW_center_raw, allMasks, numMasks, ...
@@ -238,15 +293,37 @@ try
                 debugFolder, baseName, SHOW_DEBUG_FIGURES);
         end
 
-        % --- 4.7: Select best candidate: closest centroid to image center ---
+        % --- 4.7: Select best candidate: at/nearest the TARGET point ---
+        % (was: closest centroid to image center — that picked off-center
+        % neighbors over the actual target lumen, e.g. H5_W12_ML3_R1)
         [lumen_candidates, ~, ~, selected_mask_idx, selected_polarity] = ...
             selectCentralLumenCandidate(allMasksExclusive, lumen_candidates, ...
-            candidate_imfill_polarity, candidate_imfill_scores, Hc, Wc);
+            candidate_imfill_polarity, candidate_imfill_scores, Hc, Wc, ...
+            target_x, target_y_cropped);
 
         if saveDebug || SHOW_DEBUG_FIGURES
             saveStep4_7Debug(I_cropped, allMasksExclusive, lumen_candidates, ...
                 selected_mask_idx, selected_polarity, debugFolder, baseName, ...
                 SHOW_DEBUG_FIGURES);
+        end
+
+        % --- 4.7b: Physical plausibility: selected mask vs expected lumen size ---
+        % The nominal channel cross-section (W x H at the OCR-measured scale)
+        % bounds how big a real lumen can plausibly be. A candidate far below
+        % the expected area is a speck/defect, not the lumen (mode-1 false
+        % positives at narrow W were 2-4k px acceptances). Gate is skipped
+        % when no expected area was provided (NaN).
+        MIN_AREA_FRAC = 0.15;
+        if ~isempty(selected_mask_idx) && isfinite(expectedLumenArea_px) && expectedLumenArea_px > 0
+            selArea = maskAreas(selected_mask_idx);
+            quality.area_vs_expected = selArea / expectedLumenArea_px;
+            if selArea < MIN_AREA_FRAC * expectedLumenArea_px
+                quality.rejection_reason = sprintf( ...
+                    'Selected mask (%d px) < %.0f%% of expected lumen area (%.0f px) — speck, not lumen', ...
+                    selArea, MIN_AREA_FRAC*100, expectedLumenArea_px);
+                selected_mask_idx = [];
+                selected_polarity = 'unknown';
+            end
         end
 
         % --- 4.8: Texture validation against anchor ---
@@ -288,7 +365,7 @@ try
             saveFinalSummaryDebug(I_cropped, BW_center_raw, BW_lumen_cropped, ...
                 anchor_mask, allMasksExclusive, numMasks, quality, ...
                 target_x, target_y_cropped, ...
-                debugFolder, baseName, SHOW_DEBUG_FIGURES);
+                debugParent, baseName, SHOW_DEBUG_FIGURES);   % *_FINAL.png -> top level
         end
     else
         quality.status           = 'no_masks_generated';

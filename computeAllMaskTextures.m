@@ -17,10 +17,21 @@ function textureFeatures = computeAllMaskTextures(Igray, allMasksExclusive, numM
 
 TRIM_FRAC = 0.25;
 
+% Absolute floor for "real" local contrast (gray levels are 0..1). The old
+% imbinarize(local_std,'adaptive') was contrast-NORMALIZING: inside a smooth,
+% near-uniform lumen it amplified faint sensor noise into dense "texture",
+% which made real lumens score HIGHER texture density than the visibly
+% striated printed anchor (observed: lumen 0.46-0.88 vs anchor 0.29-0.45),
+% and validateLumenTexture then rejected real lumens as "not formed"
+% (ratio 1.1-1.7 false negatives, e.g. H5_W9_ML6_R0, H5_W15_ML2_R1).
+% An absolute threshold keeps genuine layer striations (strong std) while a
+% smooth lumen interior correctly scores near zero.
+STD_ABS_THRESH = 0.03;
+
 % --- Compute filters once ---
 canny_BW     = edge(Igray, 'Canny', [0.01 0.1]);
 local_std    = stdfilt(Igray, ones(5));
-local_std_BW = imbinarize(local_std, 'adaptive');
+local_std_BW = local_std > STD_ABS_THRESH;
 combined_BW  = canny_BW | local_std_BW;
 
 [Hc, Wc] = size(Igray);

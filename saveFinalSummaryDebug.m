@@ -1,25 +1,32 @@
 function saveFinalSummaryDebug(I_cropped, BW_raw, BW_lumen, BW_3d_printed, ...
     allMasksExclusive, numMasks, quality, target_x, target_y, ...
     debugFolder, baseName, showFigures)
-%SAVEFINALSUMMARYDEBUG  8-panel overview of the full segmentation pipeline.
+%SAVEFINALSUMMARYDEBUG  9-panel overview of the full segmentation pipeline.
 
-fig = newFig(showFigures, 1800, 600);
+fig = newFig(showFigures, 2200, 600);
 [Hc, Wc, ~] = size(I_cropped);
 colors = lines(numMasks);
 
+% --- 0. Raw image, no annotations (visual QC needs an unobstructed view:
+%        the target cross of panel 1 can hide exactly the faint speck SAM
+%        latched onto, making false positives hard to judge) ---
+subplot(2,5,1);
+imshow(I_cropped);
+title('0. Raw Image', 'FontSize', 10);
+
 % --- 1. Input + Target ---
-subplot(2,4,1);
+subplot(2,5,2);
 imshow(I_cropped); hold on;
 plot(target_x, target_y, 'r+', 'MarkerSize', 20, 'LineWidth', 2); hold off;
 title('1. Input + Target', 'FontSize', 10);
 
 % --- 2. Raw Center Mask ---
-subplot(2,4,2);
+subplot(2,5,3);
 imshow(BW_raw);
 title('2. Raw Center Mask', 'FontSize', 10);
 
 % --- 3. All Masks ---
-subplot(2,4,3);
+subplot(2,5,4);
 mo = zeros(Hc, Wc, 3);
 for m = 1:numMasks
     thisMask = squeeze(allMasksExclusive(m,:,:));
@@ -33,17 +40,17 @@ imshow(mo * 0.6 + im2double(I_cropped) * 0.4);
 title(sprintf('3. All %d Masks', numMasks), 'FontSize', 10);
 
 % --- 4. 3D-Printed Anchor ---
-subplot(2,4,4);
+subplot(2,5,5);
 imshow(BW_3d_printed);
 title('4. Anchor (3D-printed)', 'FontSize', 10);
 
 % --- 5. Final Lumen ---
-subplot(2,4,5);
+subplot(2,5,6);
 imshow(BW_lumen);
 title(sprintf('5. Final Lumen\n%d px', sum(BW_lumen(:))), 'FontSize', 10);
 
 % --- 6. Overlay with polarity color ---
-subplot(2,4,6);
+subplot(2,5,7);
 if strcmp(quality.polarity, 'bright')
     oc = [0 1 0];
 elseif strcmp(quality.polarity, 'dark')
@@ -55,7 +62,7 @@ imshow(labeloverlay(I_cropped, BW_lumen, 'Colormap', oc, 'Transparency', 0.4));
 title(sprintf('6. Overlay\nPolarity: %s', upper(quality.polarity)), 'FontSize', 10);
 
 % --- 7. Structure (R) + Lumen (G) ---
-subplot(2,4,7);
+subplot(2,5,8);
 ov = im2double(I_cropped);
 for c = 1:3
     ch = ov(:,:,c);
@@ -78,8 +85,8 @@ end
 imshow(ov);
 title('7. Anchor(R) + Lumen(G)', 'FontSize', 10);
 
-% --- 8. Quality Summary ---
-subplot(2,4,8);
+% --- 8. Quality Summary (spans the last two slots of row 2) ---
+subplot(2,5,[9 10]);
 axis off;
 
 if quality.lumen_valid
