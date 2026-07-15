@@ -1,3 +1,4 @@
+%% 
 clc
 clear all
 close all
@@ -11,6 +12,8 @@ close all
 %% USER INPUTS
 pixelWidth_mm = 0.032;    % XY pixel resolution of the printer
 layerHeight_mm = 0.05;    % Z layer height specified to the printer
+assumedBarValue_mm = 0.4; % known scale-bar label ("0.4 mm", constant across the
+                          % dataset) — fallback when OCR fails or misreads it
 
 % Resolve paths relative to this machine's Dropbox root so the identical
 % script runs on the laptop (C:\Users\rvoronov\Dropbox) and on Olympus
@@ -427,8 +430,19 @@ for i = 1:height(T)
         [T.ScaleValue_OCR(i), T.ScaleUnits_OCR{i}] = parseScaleFromOCRText(ocrOut.rawText);
         T.BarPx(i) = measureScaleBarPixels(I, roi, thrWhite, minAreaPx, ...
                          minAspectRatio, minWidthPx, debugPlots);
-        if ~isnan(T.ScaleValue_OCR(i)) && T.BarPx(i) > 0
-            T.mmPerPx(i) = T.ScaleValue_OCR(i) / T.BarPx(i);
+        % Scale value: OCR is unreliable on this dataset — it returned NaN on
+        % 93% of images and, when it did read, usually dropped the decimal
+        % point ("4" instead of "0.4" on 53 of 60 reads → 10x error in every
+        % mm-valued output). The bar label is a constant "0.4 mm" across the
+        % dataset (verified visually on the raw images), and BarPx detection
+        % is reliable, so: trust OCR only when it agrees with the known bar
+        % value within 2x; otherwise fall back to the assumed value.
+        scaleVal = T.ScaleValue_OCR(i);
+        if isnan(scaleVal) || scaleVal <= 0 || abs(log10(scaleVal / assumedBarValue_mm)) > log10(2)
+            scaleVal = assumedBarValue_mm;
+        end
+        if T.BarPx(i) > 0
+            T.mmPerPx(i) = scaleVal / T.BarPx(i);
         end
         clear ocrOut  % free immediately
 

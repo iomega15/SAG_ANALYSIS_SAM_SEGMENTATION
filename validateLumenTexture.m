@@ -1,7 +1,13 @@
 function [is_valid, quality, RATIO_THRESHOLD] = validateLumenTexture( ...
     anchor_texture, selected_mask_idx, textureFeatures, quality)
 
-RATIO_THRESHOLD = 1.0;
+% Raised 1.0 -> 1.3 (2026-07-15): with the absolute-threshold texture metric,
+% real near-onset dark lumens were still being rejected at ratios 1.06-1.20
+% (H5_W11_ML5_R2 1.12, H5_W11_ML6_R0 1.06, H5_W12_ML6_R0 1.20) while genuine
+% collapse rejects sit far higher (14.06 at W100). The speck/merged-region
+% false-positive risk this opens is covered by the 4.7b size gate (armed by
+% the OCR scale fallback) and target-anchored selection.
+RATIO_THRESHOLD = 1.3;
 is_valid = false;
 
 if isempty(selected_mask_idx)

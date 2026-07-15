@@ -284,7 +284,7 @@ try
         [lumen_candidates, candidate_imfill_polarity, candidate_imfill_scores, imfill_cache, ...
             anchor_score, ~, ~, diff_gray_full, diff_inv_full] = ...
             detectImfillCandidates(Igray_cropped_u8, allMasksExclusive, maskAreas, ...
-            lumen_candidates, anchor_mask);
+            lumen_candidates, anchor_mask, target_x, target_y_cropped);
 
         if saveDebug || SHOW_DEBUG_FIGURES
             saveStep4_6Debug(I_cropped, allMasksExclusive, lumen_candidates, ...
@@ -314,6 +314,10 @@ try
         % positives at narrow W were 2-4k px acceptances). Gate is skipped
         % when no expected area was provided (NaN).
         MIN_AREA_FRAC = 0.15;
+        MAX_AREA_FAC  = 4;     % > 4x expected = merged/ballooned region (e.g. collapsed
+                               % roof band), not the lumen — needed as the counterpart to
+                               % the 4.6 contains-target retention, which can pass large
+                               % SAM center masks through to selection.
         if ~isempty(selected_mask_idx) && isfinite(expectedLumenArea_px) && expectedLumenArea_px > 0
             selArea = maskAreas(selected_mask_idx);
             quality.area_vs_expected = selArea / expectedLumenArea_px;
@@ -321,6 +325,12 @@ try
                 quality.rejection_reason = sprintf( ...
                     'Selected mask (%d px) < %.0f%% of expected lumen area (%.0f px) — speck, not lumen', ...
                     selArea, MIN_AREA_FRAC*100, expectedLumenArea_px);
+                selected_mask_idx = [];
+                selected_polarity = 'unknown';
+            elseif selArea > MAX_AREA_FAC * expectedLumenArea_px
+                quality.rejection_reason = sprintf( ...
+                    'Selected mask (%d px) > %dx expected lumen area (%.0f px) — merged region, not lumen', ...
+                    selArea, MAX_AREA_FAC, expectedLumenArea_px);
                 selected_mask_idx = [];
                 selected_polarity = 'unknown';
             end
