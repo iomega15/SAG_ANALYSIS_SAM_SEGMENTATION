@@ -135,41 +135,50 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                 end
             end
 
+            %% --- Membrane-touchdown inference (physical, per roof row) ---
+            % A "Not Formed" cell to the RIGHT of the last Open cell in the
+            % same roof row cannot actually be unformed: at larger widths the
+            % lumen is geometrically guaranteed to have formed (it lies beyond
+            % the open band), so a non-detection there can only mean the
+            % membrane sagged through the full channel height and contacted
+            % the floor. Relabel those cells as code 5 = Membrane Touchdown
+            % so the map distinguishes the sag-driven upper failure boundary
+            % from the narrow-width formation-failure boundary.
+            for ri = 1:nRoofs
+                openCols = find(codeMatrix(ri, :) == 3);
+                if isempty(openCols), continue; end
+                for wi = (max(openCols)+1):nWidths
+                    if codeMatrix(ri, wi) == 1
+                        codeMatrix(ri, wi) = 5;
+                    end
+                end
+            end
+
             %% --- Draw figure ---
             fig = figure('Position', [100 100 1000 700], 'Color', 'w');
 
-            hasUnknownInPlot = any(codeMatrix(:) == 4);
+            % Master category table (code = row index). Colorbar shows only
+            % the categories present in this particular grid.
+            masterCmap = [
+                1    0    0        % 1 = Failed             → red
+                1    1    0        % 2 = Occluded           → yellow
+                0    1    0        % 3 = Open               → green
+                0.80 0.80 0.80     % 4 = Unknown            → gray
+                0.55 0    0.85     % 5 = Membrane Touchdown → purple
+            ];
+            masterLabels = {'Not Formed','Occluded','Open','Unknown','Membrane Touchdown'};
 
-            if hasUnknownInPlot
-                cmapToUse = [
-                    1    0    0        % 1 = Failed   → red
-                    0    1    1        % 2 = Occluded → cyan
-                    0    1    0        % 3 = Open     → green
-                    0.80 0.80 0.80     % 4 = Unknown  → gray
-                ];
-                climVals = [1 4];
-                cbTicks  = 1:4;
-                cbLabels = {'Not Formed','Occluded','Open','Unknown'};
-            else
-                cmapToUse = [
-                    1 0 0     % 1 = Failed   → red
-                    1 1 0     % 2 = Occluded → yellow
-                    0 1 0     % 3 = Open     → green
-                ];
-                climVals = [1 3];
-                cbTicks  = 1:3;
-                cbLabels = {'Not Formed','Occluded','Open'};
-            end
+            presentCodes = unique(codeMatrix(~isnan(codeMatrix)));
 
             imagesc(1:nWidths, 1:nRoofs, codeMatrix);
-            colormap(cmapToUse);
-            caxis(climVals);
+            colormap(masterCmap);
+            caxis([1 5]);
 
             cb = colorbar;
             cb.FontWeight = 'bold';
             cb.FontSize   = 11;
-            cb.Ticks      = cbTicks;
-            cb.TickLabels = cbLabels;
+            cb.Ticks      = presentCodes;
+            cb.TickLabels = masterLabels(presentCodes);
 
             set(gca, 'XTick', 1:nWidths, ...
                      'XTickLabel', arrayfun(@num2str, widths, 'Uni', false));
@@ -196,6 +205,7 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                             case 2, txt = 'X';
                             case 3, txt = 'O';
                             case 4, txt = '?';
+                            case 5, txt = 'T';   % membrane touchdown
                             otherwise, txt = '?';
                         end
                     end

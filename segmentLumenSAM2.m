@@ -313,7 +313,17 @@ try
         % the expected area is a speck/defect, not the lumen (mode-1 false
         % positives at narrow W were 2-4k px acceptances). Gate is skipped
         % when no expected area was provided (NaN).
-        MIN_AREA_FRAC = 0.15;
+        % NOTE (2026-07-17): the LOWER area bound (15% of expected) was removed
+        % after run-3 review. Post-mortem: at narrow W the speck false-positives
+        % it was designed to catch EXCEED their tiny expected areas (2-3x), so
+        % the lower bound never fired on them — while at W10+ it fired almost
+        % exclusively on real, under-segmented dark lumens, wrongly converting
+        % "found (partial)" into "no lumen formed" (trinary-flipping, Roman's
+        % must-fix, e.g. H5_W11_ML8_R0's 433 px capture of a real lumen).
+        % Under-sized captures are now allowed through: the trinary call is
+        % right, and area_vs_expected records how partial the capture is.
+        % Narrow-W specks are covered by the texture gate (solid-material
+        % interiors score high under the absolute-threshold metric).
         MAX_AREA_FAC  = 4;     % > 4x expected = merged/ballooned region (e.g. collapsed
                                % roof band), not the lumen — needed as the counterpart to
                                % the 4.6 contains-target retention, which can pass large
@@ -321,13 +331,7 @@ try
         if ~isempty(selected_mask_idx) && isfinite(expectedLumenArea_px) && expectedLumenArea_px > 0
             selArea = maskAreas(selected_mask_idx);
             quality.area_vs_expected = selArea / expectedLumenArea_px;
-            if selArea < MIN_AREA_FRAC * expectedLumenArea_px
-                quality.rejection_reason = sprintf( ...
-                    'Selected mask (%d px) < %.0f%% of expected lumen area (%.0f px) — speck, not lumen', ...
-                    selArea, MIN_AREA_FRAC*100, expectedLumenArea_px);
-                selected_mask_idx = [];
-                selected_polarity = 'unknown';
-            elseif selArea > MAX_AREA_FAC * expectedLumenArea_px
+            if selArea > MAX_AREA_FAC * expectedLumenArea_px
                 quality.rejection_reason = sprintf( ...
                     'Selected mask (%d px) > %dx expected lumen area (%.0f px) — merged region, not lumen', ...
                     selArea, MAX_AREA_FAC, expectedLumenArea_px);
