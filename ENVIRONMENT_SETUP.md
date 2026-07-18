@@ -1,6 +1,6 @@
 # Environment Setup — SAM-Based Printability/Sag Analysis Pipeline
 
-Setup instructions for running `IMAGE_ANALYSIS4.m` (and the companion
+Setup instructions for running `IMAGE_ANALYSIS5.m` (and the companion
 `VALVE_CLOSURE_ANALYSIS` pipeline, which shares this Python/SAM stack via
 `addpath`) on a new Windows machine. All steps are doable as a **regular
 (non-admin) user** except where noted.
