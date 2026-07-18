@@ -135,6 +135,47 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                 end
             end
 
+            %% --- No-open-left-of-the-occluded-band rule (Roman, run-4 review) ---
+            % Physically, an OPEN lumen cannot exist at widths below the
+            % occluded (dark) band: formation proceeds not-formed -> occluded
+            % -> open as width grows. Run 4 produced a rash of bright-labeled
+            % false positives at W1-W7 that paint spurious "Open" cells into
+            % the narrow region. Rule: locate the main open band (the
+            % contiguous run of open-majority width columns containing the
+            % widest open-majority column); ANY open cell left of that band's
+            % start is demoted to its column's majority class (occluded or
+            % not-formed), defaulting to occluded.
+            colMaj = nan(1, nWidths);
+            for wi = 1:nWidths
+                codes = codeMatrix(:, wi);
+                codes = codes(~isnan(codes));
+                if ~isempty(codes), colMaj(wi) = mode(codes); end
+            end
+            openMajCols = find(colMaj == 3);
+            nDemoted = 0;
+            if ~isempty(openMajCols)
+                bandStart = max(openMajCols);
+                while bandStart > 1 && colMaj(bandStart-1) == 3
+                    bandStart = bandStart - 1;
+                end
+                for wi = 1:(bandStart-1)
+                    for ri = 1:nRoofs
+                        if codeMatrix(ri, wi) == 3
+                            if ismember(colMaj(wi), [1 2])
+                                codeMatrix(ri, wi) = colMaj(wi);
+                            else
+                                codeMatrix(ri, wi) = 2;   % default: occluded
+                            end
+                            nDemoted = nDemoted + 1;
+                        end
+                    end
+                end
+            end
+            if nDemoted > 0
+                fprintf('  [%s H%d] no-open-left-of-band rule: demoted %d open cell(s)\n', ...
+                    thisCond, thisH, nDemoted);
+            end
+
             %% --- Membrane-touchdown inference (physical, per roof row) ---
             % A "Not Formed" cell to the RIGHT of the last Open cell in the
             % same roof row cannot actually be unformed: at larger widths the

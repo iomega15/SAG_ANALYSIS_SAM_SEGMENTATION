@@ -485,13 +485,13 @@ for i = 1:height(T)
         if ~isnan(T.mmPerPx(i)) && T.mmPerPx(i) > 0
             expW_px = T.Width_px(i)  * pixelWidth_mm  / T.mmPerPx(i);   % Width_px = printer px
             expH_px = T.H_layers(i)  * layerHeight_mm / T.mmPerPx(i);
-            expectedLumenArea_px = expW_px * expH_px;
+            expectedLumenWH_px = [expW_px expH_px];
         else
-            expectedLumenArea_px = NaN;   % OCR scale unavailable -> gate skipped
+            expectedLumenWH_px = [NaN NaN];   % scale unavailable -> geometry gates skipped
         end
 
         [BWlumen, samQuality] = segmentLumenSAM2(I, roi, samDebugArg, baseName, ...
-            samMaskCacheDir, expectedLumenArea_px);
+            samMaskCacheDir, expectedLumenWH_px);
 
         T.SAM_Confidence(i)      = samQuality.confidence;
         T.SAM_NumMasks(i)        = samQuality.num_masks;

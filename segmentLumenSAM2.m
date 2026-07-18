@@ -1,4 +1,4 @@
-function [BWlumen, quality] = segmentLumenSAM2(I, roi, debugFolder, baseName, rawCacheDir, expectedLumenArea_px)
+function [BWlumen, quality] = segmentLumenSAM2(I, roi, debugFolder, baseName, rawCacheDir, expectedLumenWH_px)
 % SEGMENTLUMENSAM: Center-based SAM + Texture Clustering Validation
 %
 % rawCacheDir (optional): folder for caching the RAW SAM output (all masks,
@@ -6,9 +6,10 @@ function [BWlumen, quality] = segmentLumenSAM2(I, roi, debugFolder, baseName, ra
 %   than the final selected lumen means the candidate-selection / validation
 %   logic below can be re-tuned and re-run cheaply without re-running SAM
 %   inference. Delete the cache only if the input images or roi change.
-% expectedLumenArea_px (optional): expected lumen cross-section in image
-%   pixels (from nominal W x H and the OCR scale). Used as a physical
-%   plausibility gate on the selected candidate; pass NaN/[] to skip.
+% expectedLumenWH_px (optional): [width height] of the nominal lumen in
+%   image pixels (from the filename geometry and the OCR/assumed scale).
+%   Feeds the merged-region upper area bound and the bright-mask aspect
+%   prior; pass NaN/[] to skip both.
 
 %% ====================================================================
 SHOW_DEBUG_FIGURES = false;
@@ -37,7 +38,8 @@ quality.anchor_density   = 0;
 if nargin < 3, debugFolder = ''; end
 if nargin < 4, baseName = 'image'; end
 if nargin < 5, rawCacheDir = ''; end
-if nargin < 6 || isempty(expectedLumenArea_px), expectedLumenArea_px = NaN; end
+if nargin < 6 || isempty(expectedLumenWH_px), expectedLumenWH_px = [NaN NaN]; end
+expectedLumenArea_px = prod(expectedLumenWH_px);
 
 quality.expected_lumen_area_px = expectedLumenArea_px;
 quality.area_vs_expected       = NaN;
@@ -340,9 +342,15 @@ try
             end
         end
 
-        % --- 4.8: Texture validation against anchor ---
-        [lumen_valid, quality, RATIO_THRESHOLD] = validateLumenTexture( ...
-            anchor_texture, selected_mask_idx, textureFeatures, quality);
+        % --- 4.8: Intensity-contrast validation + polarity (batch-4 rewrite) ---
+        % Judges the selected mask by mask-vs-surroundings median intensity;
+        % also overrides the imfill polarity vote (which mislabeled dark
+        % lumens as bright ~14x in run 4) with the sign of that contrast.
+        [lumen_valid, quality, RATIO_THRESHOLD, polarity_intensity] = validateLumenTexture( ...
+            Igray_cropped_dbl, allMasksExclusive, selected_mask_idx, quality, expectedLumenWH_px);
+        if ~strcmp(polarity_intensity, 'unknown')
+            selected_polarity = polarity_intensity;
+        end
 
         if saveDebug || SHOW_DEBUG_FIGURES
             saveStep4_8Debug(I_cropped, allMasksExclusive, ...
