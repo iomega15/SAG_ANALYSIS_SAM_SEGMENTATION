@@ -154,6 +154,47 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                 end
             end
 
+            %% --- Island ban (Roman, run-5 review) ---
+            % The map should be continuous bands of one color — a connected
+            % same-code region FULLY SURROUNDED by other codes is treated as
+            % classification noise and recolored to the majority code of its
+            % neighboring cells. EXCEPTION: a component touching the grid
+            % border is KEPT — e.g. the purple touchdown block in the corner
+            % is a real physical finding (membrane collapse), and the
+            % top-border red island is ambiguous, so border-touchers are left
+            % for the ordering rules below to resolve. Runs BEFORE the
+            % monotone banding, per Roman's design.
+            nIsland = 0;
+            for pass = 1:4     % recoloring can create/merge islands; iterate briefly
+                changedAny = false;
+                for code = unique(codeMatrix(~isnan(codeMatrix)))'
+                    CC = bwconncomp(codeMatrix == code, 4);
+                    for k = 1:CC.NumObjects
+                        [rr, cc] = ind2sub([nRoofs nWidths], CC.PixelIdxList{k});
+                        if any(rr == 1 | rr == nRoofs | cc == 1 | cc == nWidths)
+                            continue;   % touches border -> keep
+                        end
+                        comp = false(nRoofs, nWidths);
+                        comp(CC.PixelIdxList{k}) = true;
+                        ring = imdilate(comp, ones(3)) & ~comp;
+                        ringCodes = codeMatrix(ring);
+                        ringCodes = ringCodes(~isnan(ringCodes));
+                        if isempty(ringCodes), continue; end
+                        maj = mode(ringCodes);
+                        if maj ~= code
+                            codeMatrix(CC.PixelIdxList{k}) = maj;
+                            nIsland = nIsland + numel(rr);
+                            changedAny = true;
+                        end
+                    end
+                end
+                if ~changedAny, break; end
+            end
+            if nIsland > 0
+                fprintf('  [%s H%d] island ban: recolored %d cell(s)\n', ...
+                    thisCond, thisH, nIsland);
+            end
+
             %% --- Monotone formation-stage banding (Roman, run-5 review) ---
             % Physics: as width grows, a channel progresses not-formed ->
             % occluded -> open, MONOTONICALLY, within a roof row. Therefore:

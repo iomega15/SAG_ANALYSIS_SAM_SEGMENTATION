@@ -1,4 +1,6 @@
 %% 
+%% 
+%% 
 clc
 clear all
 close all
@@ -42,17 +44,29 @@ saveSagDebug   = true;        % Save sag analysis debug images
 saveSamDebugFigures = true;   % SAM per-step debug figures (Step0..4_8). ON for review;
                               % set false only for the final trusted production run.
 
-resumeRun = false;    % true = keep existing debug/results, false = clean start
+resumeRun = true;    % true = keep existing backup/debug/results (required for the
+                     % result cache below to survive between runs; stale entries
+                     % are auto-invalidated by PIPELINE_VERSION, so 'true' is the
+                     % safe default). false = clean start (wipes backup/, debug/,
+                     % results/ — SAM_MASK_CACHE and OCR cache always survive).
 
 % Result cache (the per-image `backup\*_full_results.mat` full-row cache and the
 % end-of-run `T_backup.mat`). When ON, a finished row is reloaded verbatim,
-% SKIPPING both SAM *and* the sag measurement. That is what you want only for a
-% final production run you might need to resume after an interruption.
-% During sag-ALGORITHM tuning keep this OFF: every run then recomputes sag from
-% the (still-cached) SAM masks, so you actually see your new algorithm's output.
-% NOTE: this is independent of SAM_MASK_CACHE, which stays on regardless and is
-% the layer that makes re-tuning fast (skips SAM, not sag).
-useResultCache = false;
+% SKIPPING both SAM *and* the sag measurement — so a re-run only computes
+% newly-ADDED images (datasets grow over time) or images whose backup is
+% missing/stale. Backups are stamped with PIPELINE_VERSION below: bump that
+% string whenever the MEASUREMENT code changes, and every old backup
+% auto-invalidates (this is what prevents the stale-cache-after-code-change
+% failure that produced run 2's schema crash). During algorithm tuning you
+% can either set this false or just bump the version — same effect.
+% NOTE: independent of SAM_MASK_CACHE (raw SAM output, always on) and the
+% OCR cache (<base>_ocr.mat, always on) — those survive version bumps
+% because their contents depend only on the images, not the analysis code.
+useResultCache = true;
+
+% Bump on ANY change to measurement/selection/validation code. Old per-image
+% backups and T_backup.mat with a different stamp are ignored and recomputed.
+PIPELINE_VERSION = 'IA5_2026-07-19a';
 
 %% CREATE BACKUP FOLDER
 backupDir = fullfile(rootDir, 'backup');
@@ -397,12 +411,23 @@ checkReplicateCompleteness(T);
 %% CHECK FOR FULL TABLE BACKUP
 fullBackupFile = fullfile(rootDir, 'T_backup.mat');
 
+goto_postprocessing = false;
 if resumeRun && useResultCache && exist(fullBackupFile, 'file')
-    fprintf('=== Found T_backup.mat — skipping Pass 1, loading table directly ===\n');
-    load(fullBackupFile, 'T');
-    goto_postprocessing = true;
-else
-    goto_postprocessing = false;
+    Lb = load(fullBackupFile);
+    % Version guard (stale code) + dataset-growth guard: if images were ADDED
+    % since the backup was written, its table is incomplete — skipping Pass 1
+    % would silently drop the new data. In that case fall through to Pass 1,
+    % where per-image backups make the already-done rows fast.
+    versionOK = isfield(Lb, 'cacheVersion') && strcmp(Lb.cacheVersion, PIPELINE_VERSION);
+    datasetOK = isfield(Lb, 'T') && isequal(sort(Lb.T.File), sort(T.File));
+    if versionOK && datasetOK
+        fprintf('=== Found valid T_backup.mat — skipping Pass 1, loading table directly ===\n');
+        T = Lb.T;
+        goto_postprocessing = true;
+    else
+        fprintf('=== T_backup.mat stale (version/dataset changed) — running Pass 1 ===\n');
+    end
+    clear Lb
 end
 
 if ~goto_postprocessing
@@ -424,12 +449,36 @@ for i = 1:height(T)
         I = imread(fpath);
         fprintf('[%d/%d] %s\n', i, height(T), T.File{i});
 
-        % --- OCR block ---
-        ocrOut = extractLensAndScaleTextOCR(I, roi, false);
-        [T.Lens_OCR(i), T.TiltDeg_OCR(i)]     = parseLensTiltFromOCR(ocrOut.rawText);
-        [T.ScaleValue_OCR(i), T.ScaleUnits_OCR{i}] = parseScaleFromOCRText(ocrOut.rawText);
-        T.BarPx(i) = measureScaleBarPixels(I, roi, thrWhite, minAreaPx, ...
-                         minAspectRatio, minWidthPx, debugPlots);
+        [~, baseName, ~] = fileparts(T.File{i});
+
+        % --- OCR block (cached: results depend only on the image, so they
+        %     survive PIPELINE_VERSION bumps; ~2-4 s/image saved on reruns) ---
+        ocrCacheFile = fullfile(samMaskCacheDir, [baseName '_ocr.mat']);
+        gotOCR = false;
+        if exist(ocrCacheFile, 'file')
+            try
+                So = load(ocrCacheFile, 'ocrVals');
+                T.Lens_OCR(i)        = So.ocrVals.lens;
+                T.TiltDeg_OCR(i)     = So.ocrVals.tilt;
+                T.ScaleValue_OCR(i)  = So.ocrVals.scaleVal;
+                T.ScaleUnits_OCR{i}  = So.ocrVals.scaleUnits;
+                T.BarPx(i)           = So.ocrVals.barPx;
+                gotOCR = true;
+            catch
+                gotOCR = false;
+            end
+        end
+        if ~gotOCR
+            ocrOut = extractLensAndScaleTextOCR(I, roi, false);
+            [T.Lens_OCR(i), T.TiltDeg_OCR(i)]     = parseLensTiltFromOCR(ocrOut.rawText);
+            [T.ScaleValue_OCR(i), T.ScaleUnits_OCR{i}] = parseScaleFromOCRText(ocrOut.rawText);
+            T.BarPx(i) = measureScaleBarPixels(I, roi, thrWhite, minAreaPx, ...
+                             minAspectRatio, minWidthPx, debugPlots);
+            ocrVals = struct('lens', T.Lens_OCR(i), 'tilt', T.TiltDeg_OCR(i), ...
+                'scaleVal', T.ScaleValue_OCR(i), 'scaleUnits', {T.ScaleUnits_OCR{i}}, ...
+                'barPx', T.BarPx(i));
+            try, save(ocrCacheFile, 'ocrVals'); catch, end
+        end
         % Scale value: OCR is unreliable on this dataset — it returned NaN on
         % 93% of images and, when it did read, usually dropped the decimal
         % point ("4" instead of "0.4" on 53 of 60 reads → 10x error in every
@@ -446,27 +495,28 @@ for i = 1:height(T)
         end
         clear ocrOut  % free immediately
 
-        % --- Backup / cache check ---
-        [~, baseName, ~] = fileparts(T.File{i});
+        % --- Backup / result-cache check ---
         backupFile = fullfile(backupDir, [baseName '_full_results.mat']);
         forceSAM   = false;
 
         if useResultCache && exist(backupFile, 'file') && ~forceSAM
-            loadedData = load(backupFile, 'rowTable');  % only load what's needed
-            % Schema guard: a full-row cache written by an OLDER version of this
-            % script has a different set of columns, and `T(i,:) = rowTable`
-            % demands an exact match (this used to crash every cached image with
-            % "The number of table variables in an assignment must match"). If it
-            % no longer matches the current table, ignore the stale cache and
-            % recompute this row instead of erroring.
-            if width(loadedData.rowTable) == width(T) && ...
-                    isequal(loadedData.rowTable.Properties.VariableNames, T.Properties.VariableNames)
+            loadedData = load(backupFile);
+            % Guards: (1) VERSION stamp — a backup written by different
+            % measurement code is stale even if the schema happens to match
+            % (bit us in run 2); (2) schema — `T(i,:) = rowTable` demands an
+            % exact column match or it errors.
+            versionOK = isfield(loadedData, 'cacheVersion') && ...
+                strcmp(loadedData.cacheVersion, PIPELINE_VERSION);
+            schemaOK = isfield(loadedData, 'rowTable') && ...
+                width(loadedData.rowTable) == width(T) && ...
+                isequal(loadedData.rowTable.Properties.VariableNames, T.Properties.VariableNames);
+            if versionOK && schemaOK
                 T(i,:) = loadedData.rowTable;
                 clear loadedData I
                 fprintf('  [CACHED]\n');
                 continue;
             else
-                fprintf('  [stale cache ignored — schema changed, recomputing]\n');
+                fprintf('  [stale result cache ignored (version/schema) — recomputing]\n');
                 clear loadedData
             end
         end
@@ -650,7 +700,8 @@ for i = 1:height(T)
         % --- Save backup (only when the result cache is in use) ---
         if useResultCache
             rowTable = T(i,:);
-            save(backupFile, 'BWlumen_rotated', 'samQuality', 'rowTable');
+            cacheVersion = PIPELINE_VERSION;
+            save(backupFile, 'BWlumen_rotated', 'samQuality', 'rowTable', 'cacheVersion');
         end
 
     catch ME
@@ -684,7 +735,8 @@ toc
 
 %% SAVE FULL TABLE BACKUP (only when the result cache is in use)
 if useResultCache
-    save(fullBackupFile, 'T', '-v7.3');
+    cacheVersion = PIPELINE_VERSION;
+    save(fullBackupFile, 'T', 'cacheVersion', '-v7.3');
     fprintf('Saved full table backup: %s\n', fullBackupFile);
 end
 
