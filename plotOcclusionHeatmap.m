@@ -135,47 +135,6 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                 end
             end
 
-            %% --- No-open-left-of-the-occluded-band rule (Roman, run-4 review) ---
-            % Physically, an OPEN lumen cannot exist at widths below the
-            % occluded (dark) band: formation proceeds not-formed -> occluded
-            % -> open as width grows. Run 4 produced a rash of bright-labeled
-            % false positives at W1-W7 that paint spurious "Open" cells into
-            % the narrow region. Rule: locate the main open band (the
-            % contiguous run of open-majority width columns containing the
-            % widest open-majority column); ANY open cell left of that band's
-            % start is demoted to its column's majority class (occluded or
-            % not-formed), defaulting to occluded.
-            colMaj = nan(1, nWidths);
-            for wi = 1:nWidths
-                codes = codeMatrix(:, wi);
-                codes = codes(~isnan(codes));
-                if ~isempty(codes), colMaj(wi) = mode(codes); end
-            end
-            openMajCols = find(colMaj == 3);
-            nDemoted = 0;
-            if ~isempty(openMajCols)
-                bandStart = max(openMajCols);
-                while bandStart > 1 && colMaj(bandStart-1) == 3
-                    bandStart = bandStart - 1;
-                end
-                for wi = 1:(bandStart-1)
-                    for ri = 1:nRoofs
-                        if codeMatrix(ri, wi) == 3
-                            if ismember(colMaj(wi), [1 2])
-                                codeMatrix(ri, wi) = colMaj(wi);
-                            else
-                                codeMatrix(ri, wi) = 2;   % default: occluded
-                            end
-                            nDemoted = nDemoted + 1;
-                        end
-                    end
-                end
-            end
-            if nDemoted > 0
-                fprintf('  [%s H%d] no-open-left-of-band rule: demoted %d open cell(s)\n', ...
-                    thisCond, thisH, nDemoted);
-            end
-
             %% --- Membrane-touchdown inference (physical, per roof row) ---
             % A "Not Formed" cell to the RIGHT of the last Open cell in the
             % same roof row cannot actually be unformed: at larger widths the
@@ -193,6 +152,46 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                         codeMatrix(ri, wi) = 5;
                     end
                 end
+            end
+
+            %% --- Monotone formation-stage banding (Roman, run-5 review) ---
+            % Physics: as width grows, a channel progresses not-formed ->
+            % occluded -> open, MONOTONICALLY, within a roof row. Therefore:
+            % no red (F) right of yellow/green, no yellow/green left of the
+            % red band, no green inside the yellow band. The two partial
+            % rules used previously (no-open-left-of-band; ad-hoc) could not
+            % guarantee this, so run 5 still showed F islands right of X and
+            % X strays left of F. Enforce the ordering exactly: per row, fit
+            % the maximum-agreement monotone partition  F* X* O*  over the
+            % cells (touchdown cells, code 5, sit at the extreme right and
+            % are excluded/kept; NaN cells skipped), then relabel every cell
+            % to its fitted stage. This is the minimal set of relabelings
+            % that satisfies the ordering, given the observed cells.
+            nBanded = 0;
+            for ri = 1:nRoofs
+                rowCodes = codeMatrix(ri, :);
+                fitIdx = find(~isnan(rowCodes) & rowCodes >= 1 & rowCodes <= 3);
+                if numel(fitIdx) < 2, continue; end
+                obs = rowCodes(fitIdx);
+                n   = numel(obs);
+                bestCost = inf;
+                bestFit  = obs;
+                for b1 = 0:n                    % cells 1..b1 -> F
+                    for b2 = b1:n               % cells b1+1..b2 -> X, rest -> O
+                        fit = [ones(1,b1), 2*ones(1,b2-b1), 3*ones(1,n-b2)];
+                        cost = sum(fit ~= obs);
+                        if cost < bestCost
+                            bestCost = cost;
+                            bestFit  = fit;
+                        end
+                    end
+                end
+                nBanded = nBanded + sum(bestFit ~= obs);
+                codeMatrix(ri, fitIdx) = bestFit;
+            end
+            if nBanded > 0
+                fprintf('  [%s H%d] monotone-stage banding: relabeled %d cell(s)\n', ...
+                    thisCond, thisH, nBanded);
             end
 
             %% --- Draw figure ---
