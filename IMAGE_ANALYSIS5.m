@@ -66,7 +66,8 @@ useResultCache = true;
 
 % Bump on ANY change to measurement/selection/validation code. Old per-image
 % backups and T_backup.mat with a different stamp are ignored and recomputed.
-PIPELINE_VERSION = 'IA5_2026-07-19a';
+PIPELINE_VERSION = 'IA5_2026-07-19b';   % b: LumenArea_px bbox->mask-area fix,
+                                        % debris/sag split repaired, wall-tilt plot removed
 
 %% CREATE BACKUP FOLDER
 backupDir = fullfile(rootDir, 'backup');
@@ -594,9 +595,11 @@ for i = 1:height(T)
             rp = regionprops(BWlumen_rotated,'Area','BoundingBox');
             [~, k] = max([rp.Area]);
             bb = rp(k).BoundingBox;
+            regionArea = rp(k).Area;   % actual mask pixel count, NOT bbox area
             clear rp  % free struct array
 
-            T.LumenArea_px(i)   = bb(4)*bb(3);  % or rp(k).Area
+            T.LumenArea_px(i)   = regionArea;  % was bb(4)*bb(3) — bbox area overstated
+                                               % the lumen area for any non-rectangular mask
             T.LumenWidth_px(i)  = bb(3);
             T.LumenHeight_px(i) = bb(4);
 
@@ -785,8 +788,12 @@ plotComparativeSag(T, resultsFolder, 'SagBB_Pct_ofMeasuredHeight', 'BoundingBox'
 % You could also plot other metrics easily:
 % plotComparativeSag(T, resultsFolder, 'SagPct_ofTheoreticalHeight', 'Corner (vs Theoretical)', '_theo');
 
-% FIGURE 2: Comparative Wall Tilt
-plotWallTilt(T, resultsFolder)
+% Wall-tilt plot REMOVED (2026-07-19): legacy feature from the old thin-wall
+% device design (superseded mid-study); its LumenStatus=='bright' filter had
+% also gone stale, so it silently produced nothing. plotWallTilt.m archived in
+% unused_archive/. The per-image tilt METRICS (Left/Right/AvgWallTiltAngle_deg,
+% TotalWallInward_mm) are still measured and saved to the CSV — cut those in a
+% future publication-cleanup pass if they stay unused.
 
 %% VISUALIZE OCCLUSION HEATMAP
 plotOcclusionHeatmap(T, resultsFolder, 'classified');

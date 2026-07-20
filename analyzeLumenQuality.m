@@ -73,11 +73,18 @@ function qualityMetrics = analyzeLumenQuality(BWlumen, sagMetrics, I, mmPerPx)
         
         p = sagMetrics.profiles;
         
-        if isfield(p, 'topSmooth') && isfield(p, 'baselineIdeal') && ...
+        % NOTE (2026-07-19 fix): this used to check for p.baselineIdeal, a field
+        % measureMembraneSag stopped emitting when it switched to dual baselines
+        % (baselineCorner / baselineBB). The isfield test therefore always failed,
+        % the sag mask stayed empty, and ALL hull-minus-lumen anomaly area was
+        % misattributed to debris (DebrisArea/DebrisPct inflated). Corner-based
+        % baseline is used here — it matches the original baselineIdeal semantic
+        % (see measureMembraneSag's own idealTop_Y backward-compatibility field).
+        if isfield(p, 'topSmooth') && isfield(p, 'baselineCorner') && ...
            isfield(p, 'xCoords') && isfield(p, 'leftCornerIdx') && isfield(p, 'rightCornerIdx')
-            
+
             topSmooth = p.topSmooth;
-            baselineIdeal = p.baselineIdeal;
+            baselineIdeal = p.baselineCorner;
             xCoords = p.xCoords;
             leftIdx = p.leftCornerIdx;
             rightIdx = p.rightCornerIdx;
