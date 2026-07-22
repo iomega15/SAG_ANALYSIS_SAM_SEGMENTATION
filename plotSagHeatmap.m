@@ -22,18 +22,25 @@ for h = 1:numel(heights)
         subT = T(mask, :);
         if height(subT) < 2, continue; end
 
-        widths = sort(unique(subT.Width_px));
-        roofs  = sort(unique(subT.Roof_layers));
+        % Same channel-state classification as the qualitative heatmap, so the
+        % figures agree: Touchdown -> 100% (full-height collapse), Open ->
+        % measured median sag, Occluded/Not-Formed -> gray (no sag defined).
+        [codeMatrix, widths, roofs] = computeChannelStateMatrix(subT);
         M = nan(numel(roofs), numel(widths));
         for wi = 1:numel(widths)
             for ri = 1:numel(roofs)
-                sel  = subT.Width_px == widths(wi) & subT.Roof_layers == roofs(ri);
-                vals = subT.(sagCol)(sel);
-                vals = vals(~isnan(vals));
-                if ~isempty(vals), M(ri, wi) = median(vals); end
+                switch codeMatrix(ri, wi)
+                    case 4
+                        M(ri, wi) = 100;   % touchdown = full-height sag
+                    case 3
+                        sel  = subT.Width_px == widths(wi) & subT.Roof_layers == roofs(ri) ...
+                             & strcmp(subT.LumenStatus, 'bright');
+                        vals = subT.(sagCol)(sel);
+                        vals = vals(~isnan(vals));
+                        if ~isempty(vals), M(ri, wi) = max(0, median(vals)); end
+                end
             end
         end
-        M = max(M, 0);   % sag cannot be negative
 
         fig = figure('Position', [100 100 1150 650], 'Color', 'w', 'Visible', 'off');
         ax  = axes(fig);

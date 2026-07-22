@@ -60,7 +60,7 @@ fprintf('Re-measured %d masks (%d trustworthy sag, rest NaN). no-backup=%d, empt
     nOK, nTrust, nNoBackup, nNoMask);
 
 %% Re-render sag figures (2D heatmap + honest 3D surface) + rewrite CSV
-plotSagHeatmap(T, resultsFolder, 'SagBB_Pct_ofMeasuredHeight', 'Sag (% of measured height)', '_BB');
-plotSag3D(T,      resultsFolder, 'SagBB_Pct_ofMeasuredHeight', 'Sag (% of measured height)', '_BB');
+plotSagHeatmap(T, resultsFolder, 'SagPct_ofMeasuredHeight', 'Sag (% of measured height)', '_corner');
+plotSag3D(T,      resultsFolder, 'SagPct_ofMeasuredHeight', 'Sag (% of measured height)', '_corner');
 writetable(T, fullfile(resultsFolder, 'image_scale_results.csv'));
 fprintf('Done — sag plots + CSV updated in %s\n', resultsFolder);
