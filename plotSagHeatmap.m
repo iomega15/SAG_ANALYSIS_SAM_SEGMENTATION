@@ -30,7 +30,7 @@ for h = 1:numel(heights)
                 sel  = subT.Width_px == widths(wi) & subT.Roof_layers == roofs(ri);
                 vals = subT.(sagCol)(sel);
                 vals = vals(~isnan(vals));
-                if ~isempty(vals), M(ri, wi) = mean(vals); end
+                if ~isempty(vals), M(ri, wi) = median(vals); end
             end
         end
         M = max(M, 0);   % sag cannot be negative
