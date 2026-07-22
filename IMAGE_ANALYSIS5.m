@@ -66,8 +66,13 @@ useResultCache = true;
 
 % Bump on ANY change to measurement/selection/validation code. Old per-image
 % backups and T_backup.mat with a different stamp are ignored and recomputed.
-PIPELINE_VERSION = 'IA5_2026-07-19b';   % b: LumenArea_px bbox->mask-area fix,
-                                        % debris/sag split repaired, wall-tilt plot removed
+PIPELINE_VERSION = 'IA5_2026-07-22a';   % corner-baseline sag baked in: robust+clamped
+                                        % measureMembraneSag, touchdown=100% figures
+                                        % (bar/surf/heatmap), plotComparativeSag retired.
+                                        % Bump forces a sag recompute into the backups/CSV
+                                        % (SAM masks stay cached -> no re-segmentation).
+                                        % Prev IA5_2026-07-19b: LumenArea bbox->mask fix,
+                                        % debris/sag split, wall-tilt plot removed.
 
 %% CREATE BACKUP FOLDER
 backupDir = fullfile(rootDir, 'backup');
@@ -757,22 +762,23 @@ plotOcclusionHeatmap(T, resultsFolder);
 disp('=== TABLE AFTER PASS 1 (DATA FILLED) ===');
 disp(T(1:min(10,height(T)), {'File', 'Condition', 'SagDepth_mm', 'LumenStatus'}))
 
-%% VISUALIZATION: Sag Analysis Summary Plots (COMPARATIVE)
-% Group by Width, RoofLayers, AND Condition
-T_sag_stats = groupsummary(T, {'Width_px', 'Roof_layers', 'Condition'}, {'mean', 'std'}, 'SagPct_ofMeasuredHeight');
-valid_sag = ~isnan(T_sag_stats.mean_SagPct_ofMeasuredHeight);
-T_sag_stats = T_sag_stats(valid_sag, :);
-
-%% VISUALIZATION: Sag Analysis Summary Plots
-
-% Plot Corner-based sag (original method)
-plotComparativeSag(T, resultsFolder, 'SagPct_ofMeasuredHeight', 'Corner', '_corner');
-
-% Plot BoundingBox-based sag (new method)
-plotComparativeSag(T, resultsFolder, 'SagBB_Pct_ofMeasuredHeight', 'BoundingBox', '_BB');
-
-% You could also plot other metrics easily:
-% plotComparativeSag(T, resultsFolder, 'SagPct_ofTheoreticalHeight', 'Corner (vs Theoretical)', '_theo');
+%% VISUALIZATION: membrane sag (corner baseline)
+% The sag figures share the channel-state classification with the heatmap
+% above (computeChannelStateMatrix): Touchdown -> 100% (the roof collapsed to
+% the floor = full-height sag), Open -> measured median sag over the open
+% (bright) replicates, Occluded/Not-Formed -> gray. Three views of the same
+% data: 2D heatmap, 3D bar (primary; honest discrete cells), and 3D surface
+% (illustrative; interpolates between grid points). Corner baseline is used
+% throughout -- it is robust to wide flat roofs, whereas the BoundingBox
+% baseline over-read edge wiggles as sag (retired). jet colormap, sag as % of
+% measured lumen height.
+%
+% (Replaced plotComparativeSag, which FABRICATED 100% sag for missing
+% wide-width groups -- retired 2026-07-22; sag now comes only from measured
+% data + the validated touchdown classification.)
+plotSagHeatmap(T, resultsFolder, 'SagPct_ofMeasuredHeight', 'Sag (% of measured height)', '_corner');
+plotSag3D(T,      resultsFolder, 'SagPct_ofMeasuredHeight', 'Sag (% of measured height)', '_corner');
+plotSag3Dsurf(T,  resultsFolder, 'SagPct_ofMeasuredHeight', 'Sag (% of measured height)', '_corner');
 
 % Wall-tilt plot REMOVED (2026-07-19): legacy feature from the old thin-wall
 % device design (superseded mid-study); its LumenStatus=='bright' filter had

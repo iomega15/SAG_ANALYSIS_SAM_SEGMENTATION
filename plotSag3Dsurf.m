@@ -55,7 +55,7 @@ for h = 1:numel(heights)
             fig = figure('Position', [100 100 1300 850], 'Color', 'w', 'Visible', 'off');
             ax  = axes(fig);
             surf(ax, WW, RR, M, 'FaceColor', 'interp', 'EdgeColor', [0.3 0.3 0.3], ...
-                'FaceAlpha', 0.92);
+                'FaceAlpha', 0.6);   % semi-transparent, matching the reference
             hold(ax, 'on');
             good = ~isnan(M);
             scatter3(ax, WW(good), RR(good), M(good), 22, [0.1 0.35 0.9], 'filled', ...

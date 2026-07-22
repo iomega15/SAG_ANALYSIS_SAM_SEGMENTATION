@@ -64,17 +64,15 @@ for h = 1:numel(heights)
             ax  = axes(fig);
             b   = bar3(ax, M, 1);               % NaN bars are not drawn (gaps)
 
-            % Flat-color every bar by its own height (tall -> yellow)
+            % Gradient-color every bar ALONG its height: CData = ZData means
+            % each bar runs from blue at its base (z=0) up to its height-color
+            % at the top (a 100% touchdown bar spans the full blue->red jet
+            % range; a 50% bar spans blue->green). FaceAlpha gives the same
+            % semi-transparency as the reference surface.
             for k = 1:numel(b)
-                zd = b(k).ZData;
-                cd = nan(size(zd));
-                nb = size(zd, 1) / 6;           % bars in this series
-                for bi = 1:nb
-                    rows = (bi-1)*6 + (1:6);
-                    cd(rows, :) = max(zd(rows, :), [], 'all');
-                end
-                b(k).CData = cd;
-                b(k).FaceColor = 'flat';
+                b(k).CData = b(k).ZData;
+                b(k).FaceColor = 'interp';
+                b(k).FaceAlpha = 0.6;
                 b(k).EdgeColor = [0.25 0.25 0.25];
                 b(k).LineWidth = 0.25;
             end
