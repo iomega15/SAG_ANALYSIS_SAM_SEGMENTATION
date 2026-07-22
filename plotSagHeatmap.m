@@ -47,7 +47,7 @@ for h = 1:numel(heights)
         im  = imagesc(ax, 1:numel(widths), 1:numel(roofs), M);
         set(im, 'AlphaData', ~isnan(M));      % NaN -> transparent
         set(ax, 'Color', [0.82 0.82 0.82]);   % ...showing the gray axes bg
-        colormap(ax, parula);
+        colormap(ax, jet);
         cmax = max([1, ceil(max(M(~isnan(M))))]);
         caxis(ax, [0 cmax]);
 

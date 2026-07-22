@@ -1,30 +1,23 @@
-function plotSag3D(T, resultsFolder, sagCol, labelStr, fileSuffix)
-%PLOTSAG3D  Honest 3D bar (skyline) of membrane sag over the Width x Roof grid.
+function plotSag3Dsurf(T, resultsFolder, sagCol, labelStr, fileSuffix)
+%PLOTSAG3DSURF  3D SURFACE of membrane sag over the Width x Roof grid.
 %
-% Uses bar3, NOT surf. surf draws a continuous sheet and interpolates across
-% the empty cells of this sparse grid, inventing spurious spikes/triangles.
-% bar3 draws one discrete bar per cell — no interpolation, no invented
-% geometry.
+% Companion to plotSag3D (bar3). Same data and classification
+% (computeChannelStateMatrix): Touchdown -> 100%, Open -> measured median,
+% Occluded/Not-Formed -> NaN gap. Rendered as a semi-transparent surf with
+% the measured grid points overlaid as scatter3 markers, using the jet
+% colormap (blue 0 -> red 100).
 %
-% Sag per cell uses the SAME channel-state classification as the qualitative
-% heatmap (computeChannelStateMatrix), so the two figures agree:
-%   Touchdown  -> 100%  (roof collapsed to the floor = full-height sag; there
-%                        is no open lumen left to measure, but the sag IS 100%)
-%   Open       -> median measured sag over the open (bright) replicates
-%   Occluded / Not-Formed -> gap (no membrane sag defined)
-% Bars are flat-colored by height (tall = yellow), matching the earlier
-% surface look. Several view angles are written so a preferred one can be
-% picked.
+% CAVEAT: surf INTERPOLATES between grid points, so the surface implies sag
+% values that were not measured (e.g. a smooth ramp across the discrete
+% Open->Touchdown collapse). Prefer plotSag3D (bar3) for the quantitative
+% figure; this surface is the "smooth" alternative for illustration.
 
 if nargin < 3 || isempty(sagCol),   sagCol = 'SagPct_ofMeasuredHeight'; end
 if nargin < 4 || isempty(labelStr), labelStr = 'Sag (% of measured height)'; end
 if nargin < 5,                      fileSuffix = ''; end
 
-TOUCHDOWN_PCT = 100;   % a touchdown = the roof sagged its full height
-% First row is the CANONICAL published view (az -45: staircase rises
-% left->right, towers do not occlude the smaller bars). The rest are saved
-% as _alt_az* alternates.
-views = [ -45 30;
+TOUCHDOWN_PCT = 100;
+views = [ -45 30;      % canonical view first, then alternates
           130 30;
            45 30;
          -135 30;
@@ -45,39 +38,29 @@ for h = 1:numel(heights)
         for wi = 1:numel(widths)
             for ri = 1:numel(roofs)
                 switch codeMatrix(ri, wi)
-                    case 4                      % Touchdown -> full-height sag
+                    case 4
                         M(ri, wi) = TOUCHDOWN_PCT;
-                    case 3                      % Open -> measured median
+                    case 3
                         sel  = subT.Width_px == widths(wi) & subT.Roof_layers == roofs(ri) ...
                              & strcmp(subT.LumenStatus, 'bright');
                         vals = subT.(sagCol)(sel);
                         vals = vals(~isnan(vals));
                         if ~isempty(vals), M(ri, wi) = max(0, median(vals)); end
-                    otherwise                   % Occluded / Not-Formed -> gap
-                        M(ri, wi) = NaN;
                 end
             end
         end
 
+        [WW, RR] = meshgrid(1:numel(widths), 1:numel(roofs));
         for v = 1:size(views, 1)
             fig = figure('Position', [100 100 1300 850], 'Color', 'w', 'Visible', 'off');
             ax  = axes(fig);
-            b   = bar3(ax, M, 1);               % NaN bars are not drawn (gaps)
-
-            % Flat-color every bar by its own height (tall -> yellow)
-            for k = 1:numel(b)
-                zd = b(k).ZData;
-                cd = nan(size(zd));
-                nb = size(zd, 1) / 6;           % bars in this series
-                for bi = 1:nb
-                    rows = (bi-1)*6 + (1:6);
-                    cd(rows, :) = max(zd(rows, :), [], 'all');
-                end
-                b(k).CData = cd;
-                b(k).FaceColor = 'flat';
-                b(k).EdgeColor = [0.25 0.25 0.25];
-                b(k).LineWidth = 0.25;
-            end
+            surf(ax, WW, RR, M, 'FaceColor', 'interp', 'EdgeColor', [0.3 0.3 0.3], ...
+                'FaceAlpha', 0.92);
+            hold(ax, 'on');
+            good = ~isnan(M);
+            scatter3(ax, WW(good), RR(good), M(good), 22, [0.1 0.35 0.9], 'filled', ...
+                'MarkerEdgeColor', [0.05 0.15 0.4]);
+            hold(ax, 'off');
 
             colormap(ax, jet);
             caxis(ax, [0 TOUCHDOWN_PCT]); zlim(ax, [0 TOUCHDOWN_PCT]);
@@ -95,10 +78,10 @@ for h = 1:numel(heights)
 
             if ~exist(resultsFolder, 'dir'), mkdir(resultsFolder); end
             if v == 1     % canonical published view
-                out = fullfile(resultsFolder, sprintf('sag_3Dbar_%s_H%d%s.png', ...
+                out = fullfile(resultsFolder, sprintf('sag_3Dsurf_%s_H%d%s.png', ...
                     thisCond, thisH, fileSuffix));
             else          % alternate angles
-                out = fullfile(resultsFolder, sprintf('sag_3Dbar_%s_H%d%s_alt_az%d.png', ...
+                out = fullfile(resultsFolder, sprintf('sag_3Dsurf_%s_H%d%s_alt_az%d.png', ...
                     thisCond, thisH, fileSuffix, round(views(v,1))));
             end
             exportgraphics(fig, out, 'Resolution', 300);
