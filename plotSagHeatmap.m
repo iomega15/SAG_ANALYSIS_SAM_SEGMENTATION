@@ -71,6 +71,19 @@ for h = 1:numel(heights)
             end
         end
 
+        % Label the gray (no-data) block in-figure so the map is self-contained:
+        % gray = cells with no open lumen (not formed OR occluded per the
+        % preceding channel-state map), where membrane sag is undefined. Placed
+        % at the centroid of the gray region.
+        grayMask = isnan(M);
+        if any(grayMask(:))
+            [gr, gc] = find(grayMask);
+            text(ax, mean(gc), mean(gr), ...
+                sprintf('No open lumen\n(not formed or\noccluded)'), ...
+                'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle', ...
+                'FontSize', 13, 'FontWeight', 'bold', 'Color', [0.30 0.30 0.30]);
+        end
+
         if ~exist(resultsFolder, 'dir'), mkdir(resultsFolder); end
         out = fullfile(resultsFolder, sprintf('sag_heatmap_%s_H%d%s.png', thisCond, thisH, fileSuffix));
         exportgraphics(fig, out, 'Resolution', 300);
