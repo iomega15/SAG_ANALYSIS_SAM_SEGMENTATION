@@ -268,8 +268,8 @@ function plotOcclusionHeatmap(T, resultsFolder)
 
             xlabel('Width (printer px, 1 px = 32 \mum)', 'FontSize', 13, 'FontWeight', 'bold');
             ylabel('Roof thickness (layers, 1 layer = 50 \mum)', 'FontSize', 13, 'FontWeight', 'bold');
-            title(sprintf('%s — H=%d', thisCond, thisH), ...
-                  'FontSize', 14, 'FontWeight', 'bold');
+            % (no title — single-condition, single-height figure; condition/H
+            % are stated in the caption. Was 'Default — H=5'.)
 
             %% --- Save ---
             if ~exist(resultsFolder, 'dir'), mkdir(resultsFolder); end

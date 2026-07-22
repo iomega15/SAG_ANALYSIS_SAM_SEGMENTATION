@@ -122,21 +122,42 @@ function sagMetrics = measureMembraneSag(BW, mmPerPx, debugPlot, H_layers, Width
     isVertexLowerLeft = (yVertex > leftCornerY);
     isVertexLowerRight = (yVertex > rightCornerY);
     
+    % === SAG QUALITY GATE (2026-07-22, sag-hardening iteration 1) ===
+    % These geometry-sanity flags were previously COMPUTED BUT IGNORED
+    % ('valid' was hard-coded true), so bad parabola fits — especially on
+    % wide lumens — leaked large spurious sag values into the plots (the
+    % W120/ML10 humps). A sag measurement is trusted only if EITHER the roof
+    % is essentially FLAT (tiny central dip => real sag ~0, a legitimate
+    % measurement we must keep) OR the top edge is a clean, central,
+    % downward parabola. Anything else is unreliable -> NaN, and the sag
+    % plots/stats (which drop NaN) exclude it instead of plotting an artifact.
+    maxDip_px  = max([0, max(topSmooth(leftCornerIdx:rightCornerIdx) - idealTop_Y_corner)]);
+    isFlatRoof = maxDip_px < 0.05 * measuredHeight_px;
+    isCleanSag = parabolaFitValid && R2 >= 0.5 && ...
+                 isVertexBetween && isVertexLowerLeft && isVertexLowerRight;
+    sagTrustworthy = isFlatRoof || isCleanSag;
+
     % === METHOD 1: CORNER-BASED SAG (Original) ===
     if parabolaFitValid
         sagDepth_corner_px = yVertex - idealTop_Y_corner;
     else
-        sagDepth_corner_px = max(topSmooth(leftCornerIdx:rightCornerIdx)) - idealTop_Y_corner;
+        sagDepth_corner_px = maxDip_px;   % only reached for flat roofs now
     end
     sagArea_corner_px2 = trapz(max(0, topSmooth(leftCornerIdx:rightCornerIdx) - baselineCorner(leftCornerIdx:rightCornerIdx)));
-    
+
     % === METHOD 2: BOUNDING BOX-BASED SAG (New) ===
     if parabolaFitValid
         sagDepth_bb_px = yVertex - idealTop_Y_bb;
     else
-        sagDepth_bb_px = max(topSmooth(leftCornerIdx:rightCornerIdx)) - idealTop_Y_bb;
+        sagDepth_bb_px = max([0, max(topSmooth(leftCornerIdx:rightCornerIdx) - idealTop_Y_bb)]);
     end
     sagArea_bb_px2 = trapz(max(0, topSmooth(leftCornerIdx:rightCornerIdx) - baselineBB(leftCornerIdx:rightCornerIdx)));
+
+    % Untrustworthy measurement -> NaN so it is excluded from plots/stats.
+    if ~sagTrustworthy
+        sagDepth_corner_px = NaN;  sagArea_corner_px2 = NaN;
+        sagDepth_bb_px     = NaN;  sagArea_bb_px2     = NaN;
+    end
     
     %% 10. WALL TILT
     leftWallInward_px = leftCornerX - bbLeft;
@@ -146,7 +167,8 @@ function sagMetrics = measureMembraneSag(BW, mmPerPx, debugPlot, H_layers, Width
     rightWallTiltAngle_deg = atand(rightWallInward_px / max(1, measuredHeight_px));
     
     %% 11. PACK OUTPUT
-    sagMetrics.valid = true;
+    sagMetrics.valid = true;             % measurement RAN (debug fig still saved)
+    sagMetrics.sagTrustworthy = sagTrustworthy;   % but sag values are NaN if untrustworthy
     sagMetrics.parabolaR2 = R2;
     
     % --- Corner-Based Sag (Original Method) ---
