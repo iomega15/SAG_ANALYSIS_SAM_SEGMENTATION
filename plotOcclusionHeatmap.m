@@ -77,7 +77,8 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
     channelCode(isFailed)   = 1;
     channelCode(isOccluded) = 2;
     channelCode(isOpen)     = 3;
-    channelCode(isUnknown)  = 4;
+    channelCode(isUnknown)  = 1;   % unrecognized status -> not-formed (never occurs
+                                   % in practice; keeps code 4 free for Touchdown)
 
     %% ================================================================
     %  PRINT SUMMARY
@@ -209,7 +210,7 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                 fitIdx = find(~isnan(rowCodes) & ismember(rowCodes, [1 2 3 5]));
                 if numel(fitIdx) < 2, continue; end
                 obs = rowCodes(fitIdx);
-                obs(obs == 5) = 1;    % any pre-existing T reads as a failed observation
+                obs(obs == 4) = 1;    % any pre-existing T reads as a failed observation
                 n   = numel(obs);
                 bestCost = inf;
                 bestFit  = obs;
@@ -217,8 +218,8 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                     for b2 = b1:n                   % b1+1..b2   -> X (display 2)
                         for b3 = b2:n               % b2+1..b3   -> O (display 3)
                             fit = [ones(1,b1), 2*ones(1,b2-b1), ...
-                                   3*ones(1,b3-b2), 5*ones(1,n-b3)];   % rest -> T (5)
-                            expObs = fit; expObs(expObs == 5) = 1;     % T expects failed(1)
+                                   3*ones(1,b3-b2), 4*ones(1,n-b3)];   % rest -> T (4)
+                            expObs = fit; expObs(expObs == 4) = 1;     % T expects failed(1)
                             cost = sum(expObs ~= obs);
                             if cost < bestCost
                                 bestCost = cost;
@@ -241,19 +242,18 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
             % Master category table (code = row index). Colorbar shows only
             % the categories present in this particular grid.
             masterCmap = [
-                1    0    0        % 1 = Failed             → red
-                1    1    0        % 2 = Occluded           → yellow
-                0    1    0        % 3 = Open               → green
-                0.80 0.80 0.80     % 4 = Unknown            → gray
-                0.55 0    0.85     % 5 = Membrane Touchdown → purple
+                1    0    0        % 1 = Not Formed          → red
+                1    1    0        % 2 = Occluded            → yellow
+                0    1    0        % 3 = Open                → green
+                0.55 0    0.85     % 4 = Membrane Touchdown  → purple
             ];
-            masterLabels = {'Not Formed','Occluded','Open','Unknown','Membrane Touchdown'};
+            masterLabels = {'Not Formed','Occluded','Open','Touchdown'};
 
             presentCodes = unique(codeMatrix(~isnan(codeMatrix)));
 
             imagesc(1:nWidths, 1:nRoofs, codeMatrix);
             colormap(masterCmap);
-            caxis([1 5]);
+            caxis([1 4]);
 
             cb = colorbar;
             cb.FontWeight = 'bold';
@@ -285,8 +285,7 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                             case 1, txt = 'F';
                             case 2, txt = 'X';
                             case 3, txt = 'O';
-                            case 4, txt = '?';
-                            case 5, txt = 'T';   % membrane touchdown
+                            case 4, txt = 'T';   % membrane touchdown
                             otherwise, txt = '?';
                         end
                     end
