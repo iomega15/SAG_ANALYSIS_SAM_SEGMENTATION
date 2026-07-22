@@ -135,24 +135,13 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                 end
             end
 
-            %% --- Membrane-touchdown inference (physical, per roof row) ---
-            % A "Not Formed" cell to the RIGHT of the last Open cell in the
-            % same roof row cannot actually be unformed: at larger widths the
-            % lumen is geometrically guaranteed to have formed (it lies beyond
-            % the open band), so a non-detection there can only mean the
-            % membrane sagged through the full channel height and contacted
-            % the floor. Relabel those cells as code 5 = Membrane Touchdown
-            % so the map distinguishes the sag-driven upper failure boundary
-            % from the narrow-width formation-failure boundary.
-            for ri = 1:nRoofs
-                openCols = find(codeMatrix(ri, :) == 3);
-                if isempty(openCols), continue; end
-                for wi = (max(openCols)+1):nWidths
-                    if codeMatrix(ri, wi) == 1
-                        codeMatrix(ri, wi) = 5;
-                    end
-                end
-            end
+            % Membrane-touchdown is now assigned by the 4-stage monotone fit
+            % below (the trailing T band), NOT by a separate pass. The old
+            % "failed cell right of the last open cell" rule was defeated by a
+            % single spurious open replicate at the wide end (e.g. one open at
+            % W140 among W110-150 failures), which anchored "last open" too far
+            % right and let the banding fold the real touchdown failures into
+            % Open. The 4-stage fit is robust to such minority cells.
 
             %% --- Island ban (Roman, run-5 review) ---
             % The map should be continuous bands of one color — a connected
@@ -195,39 +184,50 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
                     thisCond, thisH, nIsland);
             end
 
-            %% --- Monotone formation-stage banding (Roman, run-5 review) ---
-            % Physics: as width grows, a channel progresses not-formed ->
-            % occluded -> open, MONOTONICALLY, within a roof row. Therefore:
-            % no red (F) right of yellow/green, no yellow/green left of the
-            % red band, no green inside the yellow band. The two partial
-            % rules used previously (no-open-left-of-band; ad-hoc) could not
-            % guarantee this, so run 5 still showed F islands right of X and
-            % X strays left of F. Enforce the ordering exactly: per row, fit
-            % the maximum-agreement monotone partition  F* X* O*  over the
-            % cells (touchdown cells, code 5, sit at the extreme right and
-            % are excluded/kept; NaN cells skipped), then relabel every cell
-            % to its fitted stage. This is the minimal set of relabelings
-            % that satisfies the ordering, given the observed cells.
+            %% --- Monotone 4-stage banding: F -> X -> O -> T (Roman, run-6) ---
+            % Physics: across increasing width in a roof row a channel passes
+            % through up to FOUR ordered stages, monotonically:
+            %   Not-Formed (narrow: lumen never forms)
+            %   -> Occluded (dark, partial lumen)
+            %   -> Open (clear lumen)
+            %   -> Membrane Touchdown (wide + thin membrane: the membrane sags
+            %      to the floor, the lumen collapses -> "no lumen detected"
+            %      again, but for the OPPOSITE reason to Not-Formed).
+            % Both the narrow Not-Formed band and the wide Touchdown band read
+            % as failed/no-lumen per-image (code 1); they are distinguished
+            % ONLY by position (before vs after the open band). The earlier
+            % 3-stage F* X* O* fit had no Touchdown band, so it folded the wide
+            % failures into Open and ERASED the membrane collapse (the run-6
+            % W110-150 low-ML corner). Fit each row to the maximum-agreement
+            % partition F* X* O* T* (any band may be empty); the trailing T
+            % band captures the collapse and is robust to a lone spurious open
+            % at the wide end. Band display codes: F=1, X=2, O=3, T=5; both the
+            % F and T bands "expect" an observed failed cell (code 1).
             nBanded = 0;
             for ri = 1:nRoofs
                 rowCodes = codeMatrix(ri, :);
-                fitIdx = find(~isnan(rowCodes) & rowCodes >= 1 & rowCodes <= 3);
+                fitIdx = find(~isnan(rowCodes) & ismember(rowCodes, [1 2 3 5]));
                 if numel(fitIdx) < 2, continue; end
                 obs = rowCodes(fitIdx);
+                obs(obs == 5) = 1;    % any pre-existing T reads as a failed observation
                 n   = numel(obs);
                 bestCost = inf;
                 bestFit  = obs;
-                for b1 = 0:n                    % cells 1..b1 -> F
-                    for b2 = b1:n               % cells b1+1..b2 -> X, rest -> O
-                        fit = [ones(1,b1), 2*ones(1,b2-b1), 3*ones(1,n-b2)];
-                        cost = sum(fit ~= obs);
-                        if cost < bestCost
-                            bestCost = cost;
-                            bestFit  = fit;
+                for b1 = 0:n                        % 1..b1      -> F (display 1)
+                    for b2 = b1:n                   % b1+1..b2   -> X (display 2)
+                        for b3 = b2:n               % b2+1..b3   -> O (display 3)
+                            fit = [ones(1,b1), 2*ones(1,b2-b1), ...
+                                   3*ones(1,b3-b2), 5*ones(1,n-b3)];   % rest -> T (5)
+                            expObs = fit; expObs(expObs == 5) = 1;     % T expects failed(1)
+                            cost = sum(expObs ~= obs);
+                            if cost < bestCost
+                                bestCost = cost;
+                                bestFit  = fit;
+                            end
                         end
                     end
                 end
-                nBanded = nBanded + sum(bestFit ~= obs);
+                nBanded = nBanded + sum(bestFit ~= rowCodes(fitIdx));
                 codeMatrix(ri, fitIdx) = bestFit;
             end
             if nBanded > 0
