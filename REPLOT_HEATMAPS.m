@@ -20,7 +20,6 @@ end
 T = readtable(csvFile, 'TextType', 'char');
 fprintf('Loaded %d rows from %s\n', height(T), csvFile);
 
-plotOcclusionHeatmap(T, resultsFolder, 'sam');
-plotOcclusionHeatmap(T, resultsFolder, 'classified');
+plotOcclusionHeatmap(T, resultsFolder);
 
 fprintf('Done — heatmaps rewritten in %s\n', resultsFolder);

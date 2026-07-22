@@ -745,35 +745,14 @@ end
 
 end  % closes the if ~goto_postprocessing block
 
-T.SAM_Polarity = T.LumenStatus;    % preserve before classification overwrites it
-%% Translate to canonical vocabulary (no reclassification)
-T.ClassifiedStatus = repmat({'failed'}, height(T), 1);
-for i = 1:height(T)
-    switch T.SAM_Polarity{i}
-        case 'bright',  T.ClassifiedStatus{i} = 'open';
-        case 'dark',    T.ClassifiedStatus{i} = 'occluded';
-        otherwise,      T.ClassifiedStatus{i} = 'failed';
-    end
-end
-
-%% Spatial smoothing — the ONLY post-processing that adds value
-T = spatialSmoothClassification(T);
-
-% Pre-classification heatmap (raw SAM per-image decisions)
-plotOcclusionHeatmap(T, resultsFolder, 'sam');
-
-%% CLASSIFY LUMEN FORMATION (post-hoc clustering)
-T = classifyLumenFormation(T);
-
-%% VISUALIZE LUMEN CLASSIFICATION
-% try/catch: this is a NON-ESSENTIAL diagnostic scatter. It must never abort
-% the run before the classified heatmap + final CSV are saved (a missing
-% Statistics ML Toolbox once did exactly that).
-try
-    plotLumenClassification(T, resultsFolder);
-catch ME_plc
-    warning('plotLumenClassification skipped: %s', ME_plc.message);
-end
+%% CHANNEL-STATE HEATMAP (single map)
+% The per-image SAM result (SAM_LumenValid + SAM_Polarity) IS the channel
+% state; plotOcclusionHeatmap derives Open/Occluded/Not-Formed from it inline
+% and infers Touchdown at the map level. The old post-hoc reclassification
+% (classifyLumenFormation) and spatial smoothing were removed 2026-07-22 as
+% dead cruft: the former had become an identical passthrough of the SAM
+% result, and the latter's output column (ClassifiedStatus) was never read.
+plotOcclusionHeatmap(T, resultsFolder);
 
 disp('=== TABLE AFTER PASS 1 (DATA FILLED) ===');
 disp(T(1:min(10,height(T)), {'File', 'Condition', 'SagDepth_mm', 'LumenStatus'}))
@@ -801,9 +780,6 @@ plotComparativeSag(T, resultsFolder, 'SagBB_Pct_ofMeasuredHeight', 'BoundingBox'
 % unused_archive/. The per-image tilt METRICS (Left/Right/AvgWallTiltAngle_deg,
 % TotalWallInward_mm) are still measured and saved to the CSV — cut those in a
 % future publication-cleanup pass if they stay unused.
-
-%% VISUALIZE OCCLUSION HEATMAP
-plotOcclusionHeatmap(T, resultsFolder, 'classified');
 
 try, findfigs; catch, end   % cosmetic figure-arranger; errors in headless -batch
 

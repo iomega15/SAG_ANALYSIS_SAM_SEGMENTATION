@@ -1,69 +1,19 @@
-function plotOcclusionHeatmap(T, resultsFolder, source)
-%PLOTOCCLUSIONHEATMAP  Channel-state heatmap from SAM or classified labels.
+function plotOcclusionHeatmap(T, resultsFolder)
+%PLOTOCCLUSIONHEATMAP  Channel-state map: Not-Formed / Occluded / Open / Touchdown.
 %
-%   plotOcclusionHeatmap(T, resultsFolder)           — auto-detect best source
-%   plotOcclusionHeatmap(T, resultsFolder, 'sam')    — use raw SAM polarity
-%   plotOcclusionHeatmap(T, resultsFolder, 'classified') — use post-hoc classification
+%   plotOcclusionHeatmap(T, resultsFolder)
 %
-% Sources:
-%   'sam'        — Uses SAM_Polarity + SAM_LumenValid (per-image SAM output)
-%   'classified' — Uses LumenStatus from classifyLumenFormation()
-%   'auto'       — Uses 'classified' if available, otherwise falls back to 'sam'
+% Per-cell state comes straight from the per-image SAM result
+% (SAM_LumenValid + SAM_Polarity): valid+bright -> Open, valid+dark ->
+% Occluded, else -> Not-Formed. Membrane Touchdown (wide + thin-membrane
+% collapse) is inferred at the map level by the 4-stage monotone banding
+% below. One map per (Condition, H). (The former 'sam' vs 'classified'
+% sources were removed: the classification stage had degenerated into an
+% identical passthrough of the SAM result.)
 
-    %% ================================================================
-    %  RESOLVE SOURCE
-    %  ================================================================
-    if nargin < 3 || isempty(source)
-        source = 'auto';
-    end
-    source = lower(source);
+    statusCol = buildStatusFromSAM(T);
 
-    has_classified = ismember('LumenStatus', T.Properties.VariableNames) && ...
-                     any(~strcmp(T.LumenStatus, 'no_data'));
-    has_sam        = ismember('SAM_Polarity', T.Properties.VariableNames) && ...
-                     ismember('SAM_LumenValid', T.Properties.VariableNames);
-
-    switch source
-        case 'auto'
-            if has_classified
-                source = 'classified';
-            elseif has_sam
-                source = 'sam';
-            else
-                error('No valid source found. Run segmentLumenSAM2 or classifyLumenFormation first.');
-            end
-            fprintf('plotOcclusionHeatmap: auto-selected source = "%s"\n', source);
-
-        case 'classified'
-            if ~has_classified
-                error('Source "classified" requested but LumenStatus column is missing or all no_data.');
-            end
-
-        case 'sam'
-            if ~has_sam
-                error('Source "sam" requested but SAM_Polarity / SAM_LumenValid columns are missing.');
-            end
-
-        otherwise
-            error('Unknown source "%s". Use "sam", "classified", or "auto".', source);
-    end
-
-    %% ================================================================
-    %  BUILD CANONICAL STATUS COLUMN
-    %  ================================================================
-    switch source
-        case 'sam'
-            statusCol = buildStatusFromSAM(T);
-            titleSuffix = '(Raw SAM)';
-            fileSuffix  = '_SAM';
-
-        case 'classified'
-            statusCol = buildStatusFromClassified(T);
-            titleSuffix = '(Classified)';
-            fileSuffix  = '_classified';
-    end
-
-    fprintf('\n=== plotOcclusionHeatmap [%s] ===\n', source);
+    fprintf('\n=== plotOcclusionHeatmap ===\n');
 
     %% ================================================================
     %  ASSIGN NUMERIC CODES
@@ -83,7 +33,7 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
     %% ================================================================
     %  PRINT SUMMARY
     %  ================================================================
-    fprintf('\n=== CHANNEL CLASSIFICATION SUMMARY [%s] ===\n', source);
+    fprintf('\n=== CHANNEL STATE SUMMARY ===\n');
     fprintf('Total samples:      %d\n', height(T));
     fprintf('  Not Formed:       %d (%.1f%%)\n', sum(isFailed),   100*sum(isFailed)/height(T));
     fprintf('  Occluded:         %d (%.1f%%)\n', sum(isOccluded), 100*sum(isOccluded)/height(T));
@@ -318,16 +268,16 @@ function plotOcclusionHeatmap(T, resultsFolder, source)
 
             xlabel('Width (printer px, 1 px = 32 \mum)', 'FontSize', 13, 'FontWeight', 'bold');
             ylabel('Roof thickness (layers, 1 layer = 50 \mum)', 'FontSize', 13, 'FontWeight', 'bold');
-            title(sprintf('%s — H=%d %s', thisCond, thisH, titleSuffix), ...
+            title(sprintf('%s — H=%d', thisCond, thisH), ...
                   'FontSize', 14, 'FontWeight', 'bold');
 
             %% --- Save ---
             if ~exist(resultsFolder, 'dir'), mkdir(resultsFolder); end
 
             outPng = fullfile(resultsFolder, ...
-                sprintf('channel_state_heatmap_%s_H%d%s.png', thisCond, thisH, fileSuffix));
+                sprintf('channel_state_heatmap_%s_H%d.png', thisCond, thisH));
             outPdf = fullfile(resultsFolder, ...
-                sprintf('heatmap_%s_H%d%s.pdf', thisCond, thisH, fileSuffix));
+                sprintf('heatmap_%s_H%d.pdf', thisCond, thisH));
 
             exportgraphics(fig, outPng, 'Resolution', 600);
             exportgraphics(fig, outPdf, 'ContentType', 'vector');
@@ -355,32 +305,6 @@ function statusCol = buildStatusFromSAM(T)
                 otherwise
                     statusCol{i} = 'failed';
             end
-        end
-    end
-end
-
-%% ====================================================================
-%  HELPER: Build status from post-hoc classified labels
-%  ====================================================================
-function statusCol = buildStatusFromClassified(T)
-    if ismember('LumenStatus', T.Properties.VariableNames)
-        statusCol = T.LumenStatus;
-    elseif ismember('LumenClass', T.Properties.VariableNames)
-        % Fallback: translate LumenClass
-        statusCol = T.LumenClass;
-        statusCol = strrep(statusCol, 'bright',     'open');
-        statusCol = strrep(statusCol, 'dark',        'occluded');
-        statusCol = strrep(statusCol, 'not_formed',  'failed');
-        statusCol = strrep(statusCol, 'no_data',     'failed');
-    else
-        error('No LumenStatus or LumenClass column found.');
-    end
-
-    % Normalize any unexpected values
-    valid_statuses = {'open', 'occluded', 'failed', 'partial'};
-    for i = 1:numel(statusCol)
-        if ~ismember(statusCol{i}, valid_statuses)
-            statusCol{i} = 'failed';
         end
     end
 end
