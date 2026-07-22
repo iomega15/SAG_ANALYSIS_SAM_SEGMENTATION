@@ -766,7 +766,14 @@ plotOcclusionHeatmap(T, resultsFolder, 'sam');
 T = classifyLumenFormation(T);
 
 %% VISUALIZE LUMEN CLASSIFICATION
-plotLumenClassification(T, resultsFolder);
+% try/catch: this is a NON-ESSENTIAL diagnostic scatter. It must never abort
+% the run before the classified heatmap + final CSV are saved (a missing
+% Statistics ML Toolbox once did exactly that).
+try
+    plotLumenClassification(T, resultsFolder);
+catch ME_plc
+    warning('plotLumenClassification skipped: %s', ME_plc.message);
+end
 
 disp('=== TABLE AFTER PASS 1 (DATA FILLED) ===');
 disp(T(1:min(10,height(T)), {'File', 'Condition', 'SagDepth_mm', 'LumenStatus'}))
@@ -798,7 +805,8 @@ plotComparativeSag(T, resultsFolder, 'SagBB_Pct_ofMeasuredHeight', 'BoundingBox'
 %% VISUALIZE OCCLUSION HEATMAP
 plotOcclusionHeatmap(T, resultsFolder, 'classified');
 
-findfigs
+try, findfigs; catch, end   % cosmetic figure-arranger; errors in headless -batch
+
 %% SAVE FINAL RESULTS
 outCsv = fullfile(resultsFolder, 'image_scale_results.csv');
 writetable(T, outCsv);
